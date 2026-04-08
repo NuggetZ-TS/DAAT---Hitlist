@@ -2,15 +2,17 @@ package com.example.daat.ui.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.daat.data.model.Snipe
 import com.example.daat.data.model.User
 import com.example.daat.data.repository.GameRepository
-import com.example.daat.logic.ScoringManager
-import com.example.daat.logic.VerificationUtils
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -35,20 +37,44 @@ class GameViewModel(
 
     private val _internalState = MutableStateFlow(GameUiState(isLoading = true))
 
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val currentTargetFlow: Flow<User?> = repository.getCurrentUser().flatMapLatest { user ->
+        user?.id?.let { repository.getCurrentTarget(it) } ?: flowOf(null)
+    }
+
     val uiState: StateFlow<GameUiState> = combine(
         repository.getCurrentUser(),
+        currentTargetFlow,
         repository.getLeaderboard("global"),
         _internalState
-    ) { user, leaderboard, internal ->
+    ) { user, target, leaderboard, internal ->
         internal.copy(
             currentUser = user,
-            leaderboard = leaderboard
+            currentTarget = target,
+            leaderboard = leaderboard,
+            isLoading = false
         )
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = GameUiState(isLoading = true)
     )
+
+    val snipeFeed: Flow<List<Snipe>> = repository.getSnipeFeed()
+
+    fun getUserById(userId: String): Flow<User?> = repository.getUserById(userId)
+
+    fun onLikeClicked(snipeId: String) {
+        viewModelScope.launch {
+            repository.toggleLike(snipeId)
+        }
+    }
+
+    fun onAssignNewTarget() {
+        viewModelScope.launch {
+            repository.assignDailyTargets("global")
+        }
+    }
 
     fun onCaptureButtonPressed(
         imageUrl: String,
@@ -62,45 +88,24 @@ class GameViewModel(
         _internalState.update { it.copy(verificationStatus = VerificationStatus.VERIFYING) }
 
         viewModelScope.launch {
-            // 1. Photo Freshness Check
-            if (!VerificationUtils.isPhotoFresh(capturedAt)) {
-                _internalState.update { it.copy(verificationStatus = VerificationStatus.FAILED_TIME) }
-                return@launch
-            }
+            val result = repository.submitSnipe(
+                hunter.id, targetId, imageUrl, hunterLat, hunterLon, capturedAt
+            )
 
-            // 2. Proximity Check
-            val target = repository.getCurrentTarget(targetId).firstOrNull() ?: return@launch
-            val targetLat = target.latitude
-            val targetLon = target.longitude
-
-            if (targetLat != null && targetLon != null) {
-                val distance = VerificationUtils.calculateDistance(hunterLat, hunterLon, targetLat, targetLon)
-                if (distance > 30.0) { // 30m limit
-                    _internalState.update { it.copy(verificationStatus = VerificationStatus.FAILED_LOCATION) }
-                    return@launch
+            result.onSuccess { points ->
+                _internalState.update {
+                    it.copy(
+                        verificationStatus = VerificationStatus.SUCCESS,
+                        lastPointsAwarded = points
+                    )
                 }
-
-                // 3. Calculate Points
-                val points = ScoringManager.calculatePoints(
-                    distanceMeters = distance,
-                    streak = hunter.currentStreak,
-                    targetAssignedAt = hunter.targetAssignedAt,
-                    capturedAt = capturedAt
-                )
-
-                // 4. Final Submission
-                val result = repository.submitSnipe(
-                    hunter.id, targetId, imageUrl, hunterLat, hunterLon, capturedAt
-                )
-
-                if (result.isSuccess) {
-                    _internalState.update {
-                        it.copy(
-                            verificationStatus = VerificationStatus.SUCCESS,
-                            lastPointsAwarded = points
-                        )
-                    }
+            }.onFailure { error ->
+                val status = when (error.message) {
+                    "TOO_FAR" -> VerificationStatus.FAILED_LOCATION
+                    "TOO_OLD" -> VerificationStatus.FAILED_TIME
+                    else -> VerificationStatus.IDLE
                 }
+                _internalState.update { it.copy(verificationStatus = status) }
             }
         }
     }
