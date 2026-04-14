@@ -1,10 +1,10 @@
 package com.example.daat.data.model
 
 data class Group(
-    val id: String,
-    val name: String,
-    val description: String,
-    val memberIds: List<String> = emptyList(),
-    val adminId: String,
-    val inviteCode: String
+    val id: String = "",
+    val name: String = "",
+    val inviteCode: String = "",
+    val adminId: String = "",
+    val members: List<String> = emptyList(),
+    val createdAt: Long = System.currentTimeMillis()
 )

@@ -1,9 +1,9 @@
 package com.example.daat.data.model
 
 data class User(
-    val id: String,
-    val name: String,
-    val username: String,
+    val id: String = "",
+    val name: String = "",
+    val username: String = "",
     val profileImageUrl: String? = null,
     val totalScore: Int = 0,
     val currentTargetId: String? = null,
@@ -11,5 +11,14 @@ data class User(
     val currentStreak: Int = 0,
     val latitude: Double? = null,
     val longitude: Double? = null,
-    val lastLocationUpdate: Long? = null
-)
+    val lastLocationUpdate: Long? = null,
+    val groupIds: List<String> = emptyList() // List of groups the user has joined
+) {
+    fun toPublicProfile() = copy(
+        latitude = null,
+        longitude = null,
+        lastLocationUpdate = null,
+        currentTargetId = null,
+        targetAssignedAt = null
+    )
+}

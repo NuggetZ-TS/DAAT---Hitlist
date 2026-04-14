@@ -1,0 +1,373 @@
+package com.example.daat.ui.screens
+
+import android.Manifest
+import android.content.Context
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.net.Uri
+import android.util.Log
+import android.view.ViewGroup
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.example.daat.logic.VerificationUtils
+import com.example.daat.ui.viewmodel.GameViewModel
+import com.example.daat.ui.viewmodel.VerificationStatus
+import com.google.accompanist.permissions.ExperimentalPermissionsApi
+import com.google.accompanist.permissions.isGranted
+import com.google.accompanist.permissions.rememberPermissionState
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.*
+import java.util.concurrent.Executor
+import kotlin.math.abs
+
+@OptIn(ExperimentalPermissionsApi::class)
+@Composable
+fun HomeScreen(viewModel: GameViewModel) {
+    val uiState by viewModel.uiState.collectAsState()
+    val cameraPermissionState = rememberPermissionState(Manifest.permission.CAMERA)
+    val snackbarHostState = remember { SnackbarHostState() }
+    val context = LocalContext.current
+    
+    // Compass/Heading tracking
+    var currentHeading by remember { mutableStateOf(0.0) }
+    
+    DisposableEffect(Unit) {
+        val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        val rotationSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+        
+        val listener = object : SensorEventListener {
+            override fun onSensorChanged(event: SensorEvent?) {
+                if (event?.sensor?.type == Sensor.TYPE_ROTATION_VECTOR) {
+                    val rotationMatrix = FloatArray(9)
+                    SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
+                    val orientation = FloatArray(3)
+                    SensorManager.getOrientation(rotationMatrix, orientation)
+                    
+                    // Convert azimuth to degrees (0 to 360)
+                    val azimuthDegrees = Math.toDegrees(orientation[0].toDouble())
+                    currentHeading = (azimuthDegrees + 360) % 360
+                }
+            }
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+        }
+        
+        sensorManager.registerListener(listener, rotationSensor, SensorManager.SENSOR_DELAY_UI)
+        
+        onDispose {
+            sensorManager.unregisterListener(listener)
+        }
+    }
+
+    // CameraX ImageCapture use case
+    val imageCapture = remember { ImageCapture.Builder().build() }
+
+    LaunchedEffect(uiState.verificationStatus) {
+        when (uiState.verificationStatus) {
+            VerificationStatus.SUCCESS -> {
+                snackbarHostState.showSnackbar("Target Eliminated! +${uiState.lastPointsAwarded} pts")
+            }
+            VerificationStatus.FAILED_LOCATION -> {
+                snackbarHostState.showSnackbar("Too far away from target!")
+            }
+            VerificationStatus.FAILED_TIME -> {
+                snackbarHostState.showSnackbar("Photo is too old!")
+            }
+            VerificationStatus.FAILED_ORIENTATION -> {
+                snackbarHostState.showSnackbar("You're not facing the target!")
+            }
+            else -> {}
+        }
+    }
+
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) }
+    ) { padding ->
+        if (cameraPermissionState.status.isGranted) {
+            Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+                // Background Camera Preview
+                CameraPreview(
+                    modifier = Modifier.fillMaxSize(),
+                    imageCapture = imageCapture
+                )
+
+                // UI Overlay
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Surface(
+                        color = Color.Black.copy(alpha = 0.5f),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.padding(top = 16.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = "DAILY TARGET",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = Color.White
+                            )
+                            Text(
+                                text = uiState.currentTarget?.name ?: "No Target Assigned",
+                                style = MaterialTheme.typography.headlineMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(32.dp))
+
+                    // Tactical Compass UI
+                    // Mock coordinates for testing orientation:
+                    // Hunter is at ...40, Alice is at ...37 (Alice is 27m EAST of hunter)
+                    val mockHunterLat = 34.0522
+                    val mockHunterLon = -118.2440
+                    val mockTargetLat = 34.0522
+                    val mockTargetLon = -118.2437 
+
+                    val targetBearing = remember(uiState.currentTarget) {
+                        VerificationUtils.calculateBearing(
+                            mockHunterLat, mockHunterLon,
+                            mockTargetLat, mockTargetLon
+                        )
+                    }
+                    
+                    TacticalCompass(
+                        currentHeading = currentHeading,
+                        targetBearing = targetBearing,
+                        modifier = Modifier.size(200.dp)
+                    )
+
+                    Spacer(modifier = Modifier.weight(1f))
+
+                    // Capture Button
+                    Button(
+                        onClick = {
+                            takePhoto(
+                                context = context,
+                                imageCapture = imageCapture,
+                                executor = ContextCompat.getMainExecutor(context),
+                                onImageCaptured = { uri ->
+                                    viewModel.onCaptureButtonPressed(
+                                        imageUrl = uri.toString(),
+                                        hunterLat = mockHunterLat,
+                                        hunterLon = mockHunterLon,
+                                        hunterHeading = currentHeading,
+                                        capturedAt = System.currentTimeMillis()
+                                    )
+                                },
+                                onError = { Log.e("Camera", "Capture failed", it) }
+                            )
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(64.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        enabled = uiState.verificationStatus != VerificationStatus.VERIFYING && uiState.currentTarget != null,
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                    ) {
+                        if (uiState.verificationStatus == VerificationStatus.VERIFYING) {
+                            CircularProgressIndicator(color = Color.White, modifier = Modifier.size(24.dp))
+                        } else {
+                            Icon(Icons.Default.CameraAlt, contentDescription = null)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("CAPTURE SNIPE", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        } else {
+            // Permission Request UI
+            Column(
+                modifier = Modifier.fillMaxSize().padding(24.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text("Camera permission is required to snipe targets.")
+                Spacer(modifier = Modifier.height(16.dp))
+                Button(onClick = { cameraPermissionState.launchPermissionRequest() }) {
+                    Text("Grant Permission")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun TacticalCompass(
+    currentHeading: Double,
+    targetBearing: Double,
+    modifier: Modifier = Modifier
+) {
+    val animatedHeading by animateFloatAsState(targetValue = currentHeading.toFloat())
+    
+    // Calculate if we are pointing roughly correctly for visual feedback
+    val diff = abs(currentHeading - targetBearing)
+    val wrappedDiff = if (diff > 180) 360 - diff else diff
+    val isAligned = wrappedDiff <= 30.0
+
+    Box(
+        modifier = modifier,
+        contentAlignment = Alignment.Center
+    ) {
+        // Outer ring
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            rotate(degrees = -animatedHeading) {
+                // North indicator
+                drawCircle(
+                    color = Color.White.copy(alpha = 0.3f),
+                    radius = size.minDimension / 2,
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx())
+                )
+                
+                // N mark
+                drawRect(
+                    color = Color.Red,
+                    topLeft = androidx.compose.ui.geometry.Offset(size.width / 2 - 2.dp.toPx(), 0f),
+                    size = androidx.compose.ui.geometry.Size(4.dp.toPx(), 15.dp.toPx())
+                )
+            }
+        }
+
+        // Target Indicator (Fixed to target bearing)
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            rotate(degrees = (targetBearing - currentHeading).toFloat()) {
+                // Arrow pointing to target
+                val path = androidx.compose.ui.graphics.Path().apply {
+                    moveTo(size.width / 2, 20.dp.toPx())
+                    lineTo(size.width / 2 - 10.dp.toPx(), 40.dp.toPx())
+                    lineTo(size.width / 2 + 10.dp.toPx(), 40.dp.toPx())
+                    close()
+                }
+                drawPath(
+                    path = path,
+                    color = if (isAligned) Color.Green else Color.Red
+                )
+            }
+        }
+
+        // Center reticle
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .background(
+                    if (isAligned) Color.Green.copy(alpha = 0.2f) else Color.Transparent,
+                    CircleShape
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = "${currentHeading.toInt()}°",
+                color = Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+    }
+}
+
+@Composable
+fun CameraPreview(
+    modifier: Modifier = Modifier,
+    imageCapture: ImageCapture
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
+
+    AndroidView(
+        factory = { ctx ->
+            val previewView = PreviewView(ctx).apply {
+                layoutParams = ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            }
+
+            cameraProviderFuture.addListener({
+                val cameraProvider = cameraProviderFuture.get()
+                val preview = Preview.Builder().build().also {
+                    it.surfaceProvider = previewView.surfaceProvider
+                }
+
+                val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+
+                try {
+                    cameraProvider.unbindAll()
+                    cameraProvider.bindToLifecycle(
+                        lifecycleOwner,
+                        cameraSelector,
+                        preview,
+                        imageCapture
+                    )
+                } catch (e: Exception) {
+                    Log.e("CameraPreview", "Use case binding failed", e)
+                }
+            }, ContextCompat.getMainExecutor(ctx))
+
+            previewView
+        },
+        modifier = modifier
+    )
+}
+
+private fun takePhoto(
+    context: Context,
+    imageCapture: ImageCapture,
+    executor: Executor,
+    onImageCaptured: (Uri) -> Unit,
+    onError: (ImageCaptureException) -> Unit
+) {
+    val name = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US)
+        .format(System.currentTimeMillis())
+    val file = File(context.cacheDir, "$name.jpg")
+
+    val outputOptions = ImageCapture.OutputFileOptions.Builder(file).build()
+
+    imageCapture.takePicture(
+        outputOptions,
+        executor,
+        object : ImageCapture.OnImageSavedCallback {
+            override fun onError(exception: ImageCaptureException) {
+                onError(exception)
+            }
+
+            override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+                onImageCaptured(Uri.fromFile(file))
+            }
+        }
+    )
+}

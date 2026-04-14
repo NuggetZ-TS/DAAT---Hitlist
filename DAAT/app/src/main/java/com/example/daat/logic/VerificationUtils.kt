@@ -26,23 +26,41 @@ object VerificationUtils {
     }
 
     /**
-     * Layer 1: Check if the photo is fresh (taken within the last minute).
-     * This is a simple logic check to prevent gallery uploads if the UI passes a timestamp.
+     * Calculates the initial bearing from point A to point B in degrees (0-360).
      */
-    fun isPhotoFresh(capturedAt: Long, currentTime: Long = System.currentTimeMillis()): Boolean {
-        val oneMinuteInMillis = 60 * 1000
-        return (currentTime - capturedAt) < oneMinuteInMillis
+    fun calculateBearing(
+        lat1: Double, lon1: Double,
+        lat2: Double, lon2: Double
+    ): Double {
+        val phi1 = Math.toRadians(lat1)
+        val phi2 = Math.toRadians(lat2)
+        val deltaLambda = Math.toRadians(lon2 - lon1)
+
+        val y = sin(deltaLambda) * cos(phi2)
+        val x = cos(phi1) * sin(phi2) - sin(phi1) * cos(phi2) * cos(deltaLambda)
+        
+        val bearing = Math.toDegrees(atan2(y, x))
+        return (bearing + 360) % 360
     }
 
     /**
-     * Layer 3: Check if the distance is within the allowed radius.
+     * Check if the device's heading is pointing towards the target within a certain threshold.
+     * @param deviceHeading The compass heading of the phone (0-360).
+     * @param targetBearing The bearing from hunter to target (0-360).
+     * @param thresholdDegrees The allowed margin of error (e.g. 30 degrees).
      */
-    fun isWithinRadius(
-        hunterLat: Double, hunterLon: Double,
-        targetLat: Double, targetLon: Double,
-        radiusMeters: Double = 30.0
+    fun isPointingAtTarget(
+        deviceHeading: Double,
+        targetBearing: Double,
+        thresholdDegrees: Double = 30.0
     ): Boolean {
-        val distance = calculateDistance(hunterLat, hunterLon, targetLat, targetLon)
-        return distance <= radiusMeters
+        val diff = abs(deviceHeading - targetBearing)
+        val wrappedDiff = if (diff > 180) 360 - diff else diff
+        return wrappedDiff <= thresholdDegrees
+    }
+
+    fun isPhotoFresh(capturedAt: Long, currentTime: Long = System.currentTimeMillis()): Boolean {
+        val oneMinuteInMillis = 60 * 1000
+        return (currentTime - capturedAt) < oneMinuteInMillis
     }
 }

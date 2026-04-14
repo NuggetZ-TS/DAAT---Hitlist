@@ -1,7 +1,11 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+<<<<<<< HEAD
     id("com.google.gms.google-services")
+=======
+    alias(libs.plugins.google.services)
+>>>>>>> 1e1e69af1b199ca3f1eee03c2522ddf5b15b689a
 }
 
 android {
@@ -11,7 +15,7 @@ android {
     defaultConfig {
         applicationId = "com.example.daat"
         minSdk = 24
-        targetSdk = 36
+        targetSdk = 35
         versionCode = 1
         versionName = "1.0"
 
@@ -49,6 +53,28 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.material3.adaptive.navigation.suite)
+    implementation(libs.androidx.compose.material.icons.extended)
+    
+    // CameraX
+    implementation(libs.androidx.camera.core)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
+    
+    // Permissions
+    implementation(libs.accompanist.permissions)
+    
+    // Image Loading
+    implementation(libs.coil.compose)
+
+    // Firebase
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.analytics)
+    implementation(libs.firebase.auth)
+    implementation(libs.firebase.firestore)
+    implementation(libs.firebase.storage)
+    implementation(libs.firebase.functions)
+
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
@@ -56,5 +82,8 @@ dependencies {
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
+<<<<<<< HEAD
     implementation("com.google.firebase:firebase-analytics")
+=======
+>>>>>>> 1e1e69af1b199ca3f1eee03c2522ddf5b15b689a
 }
