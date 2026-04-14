@@ -1,0 +1,20 @@
+{
+    "logs": [
+        {
+            "outputFile": "com.example.daat.app-mergeDebugResources-67:/values-v16/values-v16.xml",
+            "map": [
+                {
+                    "source": "C:\\Users\\Aydan\\.gradle\\caches\\9.1.0\\transforms\\806555c73489ea5da98bb8b1d61b6f7d\\workspace\\transformed\\appcompat-1.6.1\\res\\values-v16\\values-v16.xml",
+                    "from": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endLines": "5",
+                        "endColumns": "12",
+                        "endOffsets": "223"
+                    }
+                }
+            ]
+        }
+    ]
+}
