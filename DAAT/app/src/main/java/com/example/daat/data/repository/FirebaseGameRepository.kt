@@ -1,19 +1,26 @@
 package com.example.daat.data.repository
 
+import android.net.Uri
 import com.example.daat.data.model.Group
 import com.example.daat.data.model.Snipe
+import com.example.daat.data.model.SnipeStatus
 import com.example.daat.data.model.User
+import com.example.daat.logic.ScoringManager
+import com.example.daat.logic.VerificationUtils
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
+import com.google.firebase.storage.FirebaseStorage
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.tasks.await
+import java.util.UUID
 
 class FirebaseGameRepository : GameRepository {
     private val auth = FirebaseAuth.getInstance()
     private val db = FirebaseFirestore.getInstance()
+    private val storage = FirebaseStorage.getInstance()
 
     override fun getCurrentUser(): Flow<User?> = callbackFlow {
         val userId = auth.currentUser?.uid
@@ -25,10 +32,29 @@ class FirebaseGameRepository : GameRepository {
 
         val listener = db.collection("users").document(userId)
             .addSnapshotListener { snapshot, _ ->
-                val user = snapshot?.toObject(User::class.java)
-                trySend(user)
+                if (snapshot != null && snapshot.exists()) {
+                    val user = snapshot.toObject(User::class.java)
+                    trySend(user)
+                } else {
+                    // If document doesn't exist, try to create a default one
+                    // In a real app, this should be handled during a "Sign Up" flow
+                    createDefaultUser(userId)
+                    trySend(null)
+                }
             }
         awaitClose { listener.remove() }
+    }
+
+    private fun createDefaultUser(userId: String) {
+        val email = auth.currentUser?.email ?: "Guest"
+        val newUser = User(
+            id = userId,
+            name = email.substringBefore("@"),
+            username = "@${email.substringBefore("@").lowercase()}",
+            totalScore = 0,
+            groupIds = listOf("global") // Everyone starts in global
+        )
+        db.collection("users").document(userId).set(newUser)
     }
 
     override suspend fun signInAnonymously(): Result<Unit> {
@@ -113,11 +139,70 @@ class FirebaseGameRepository : GameRepository {
         hunterHeading: Double,
         capturedAt: Long
     ): Result<Int> {
-        return Result.failure(Exception("Cloud Functions not yet implemented. Please use FakeGameRepository for local testing."))
+        return try {
+            // 1. Fetch Target Location from Firestore
+            val targetDoc = db.collection("users").document(targetId).get().await()
+            val target = targetDoc.toObject(User::class.java) ?: throw Exception("TARGET_NOT_FOUND")
+            
+            val targetLat = target.latitude ?: 0.0
+            val targetLon = target.longitude ?: 0.0
+
+            // 2. Perform Verification
+            val distance = VerificationUtils.calculateDistance(hunterLat, hunterLon, targetLat, targetLon)
+            if (distance > 50.0) throw Exception("TOO_FAR")
+
+            val targetBearing = VerificationUtils.calculateBearing(hunterLat, hunterLon, targetLat, targetLon)
+            if (!VerificationUtils.isPointingAtTarget(hunterHeading, targetBearing)) {
+                throw Exception("WRONG_ORIENTATION")
+            }
+
+            // 3. Upload Image to Firebase Storage
+            val fileName = "snipes/${UUID.randomUUID()}.jpg"
+            val storageRef = storage.reference.child(fileName)
+            storageRef.putFile(Uri.parse(imageUrl)).await()
+            val downloadUrl = storageRef.downloadUrl.await().toString()
+
+            // 4. Calculate Points
+            val hunterDoc = db.collection("users").document(hunterId).get().await()
+            val hunter = hunterDoc.toObject(User::class.java) ?: throw Exception("HUNTER_NOT_FOUND")
+            
+            val points = ScoringManager.calculatePoints(
+                distanceMeters = distance,
+                streak = hunter.currentStreak,
+                targetAssignedAt = hunter.targetAssignedAt,
+                capturedAt = capturedAt
+            )
+
+            // 5. Save Snipe to Firestore
+            val snipeId = UUID.randomUUID().toString()
+            val newSnipe = Snipe(
+                id = snipeId,
+                hunterId = hunterId,
+                targetId = targetId,
+                timestamp = capturedAt,
+                imageUrl = downloadUrl,
+                status = SnipeStatus.VERIFIED,
+                pointsAwarded = points
+            )
+            db.collection("snipes").document(snipeId).set(newSnipe).await()
+
+            // 6. Update Hunter Stats & Rotate Target
+            // For now, rotation is hardcoded to a simple logic
+            db.collection("users").document(hunterId).update(mapOf(
+                "totalScore" to (hunter.totalScore + points),
+                "currentStreak" to (hunter.currentStreak + 1),
+                "currentTargetId" to null // Clear target after successful snipe
+            )).await()
+
+            Result.success(points)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
     }
 
     override suspend fun assignDailyTargets(groupId: String): Result<Unit> {
-        return Result.failure(Exception("Cloud Functions not yet implemented."))
+        // This really needs to be a Cloud Function for security
+        return Result.failure(Exception("Not implemented locally for Firebase. Use Cloud Functions."))
     }
 
     override fun getUserById(userId: String): Flow<User?> = callbackFlow {
@@ -129,7 +214,15 @@ class FirebaseGameRepository : GameRepository {
     }
 
     override suspend fun toggleLike(snipeId: String): Result<Unit> {
-        return Result.success(Unit)
+        // Simple increment for now
+        return try {
+            db.collection("snipes").document(snipeId)
+                .update("likes", com.google.firebase.firestore.FieldValue.increment(1))
+                .await()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
     }
 
     override fun getUserGroups(userId: String): Flow<List<Group>> = callbackFlow {
