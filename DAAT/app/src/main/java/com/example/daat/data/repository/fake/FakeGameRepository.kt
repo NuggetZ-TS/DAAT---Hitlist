@@ -17,13 +17,13 @@ import java.util.UUID
 
 class FakeGameRepository : GameRepository {
     private val _internalUsers = MutableStateFlow(listOf(
-        User(id = "user1", name = "Test User", username = "@tester", totalScore = 150, currentTargetId = "user2", targetAssignedAt = System.currentTimeMillis() - 3600000, latitude = 34.0522, longitude = -118.2430, groupIds = listOf("g1")),
-        User(id = "user2", name = "Alice Smith", username = "@alice", totalScore = 450, latitude = 34.0522, longitude = -118.2437, groupIds = listOf("g1")),
-        User(id = "user3", name = "Bob Jones", username = "@bob", totalScore = 50, latitude = 34.0522, longitude = -118.2438, groupIds = listOf("g1"))
+        User(id = "user1", name = "Test User", username = "@tester", totalScore = 150, currentTargetId = "user2", targetAssignedAt = System.currentTimeMillis() - 3600000, latitude = 34.0522, longitude = -118.2430, groupIds = listOf("global")),
+        User(id = "user2", name = "Alice Smith", username = "@alice", totalScore = 450, latitude = 34.0522, longitude = -118.2437, groupIds = listOf("global")),
+        User(id = "user3", name = "Bob Jones", username = "@bob", totalScore = 50, latitude = 34.0522, longitude = -118.2438, groupIds = listOf("global"))
     ))
 
     private val _groups = MutableStateFlow(listOf(
-        Group(id = "g1", name = "Global League", inviteCode = "GLOBAL", adminId = "user1", members = listOf("user1", "user2", "user3"))
+        Group(id = "global", name = "Global League", inviteCode = "GLOBAL", adminId = "system", members = listOf("user1", "user2", "user3"))
     ))
 
     private val _snipes = MutableStateFlow(listOf(
@@ -105,13 +105,11 @@ class FakeGameRepository : GameRepository {
         val targetLat = target.latitude ?: 0.0
         val targetLon = target.longitude ?: 0.0
         
-        // 1. Proximity Check (50m as requested)
         val distance = VerificationUtils.calculateDistance(hunterLat, hunterLon, targetLat, targetLon)
         if (distance > 50.0) {
             return Result.failure(Exception("TOO_FAR"))
         }
 
-        // 2. Orientation Check
         val targetBearing = VerificationUtils.calculateBearing(hunterLat, hunterLon, targetLat, targetLon)
         if (!VerificationUtils.isPointingAtTarget(hunterHeading, targetBearing)) {
             return Result.failure(Exception("WRONG_ORIENTATION"))
