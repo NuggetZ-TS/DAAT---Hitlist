@@ -2,6 +2,7 @@ package com.example.daat.ui.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.daat.data.model.Group
 import com.example.daat.data.model.Snipe
 import com.example.daat.data.model.User
 import com.example.daat.data.repository.GameRepository
@@ -24,11 +25,13 @@ data class GameUiState(
     val isLoading: Boolean = false,
     val errorMessage: String? = null,
     val verificationStatus: VerificationStatus = VerificationStatus.IDLE,
-    val lastPointsAwarded: Int? = null
+    val lastPointsAwarded: Int? = null,
+    val userGroups: List<Group> = emptyList(),
+    val isAuthLoading: Boolean = false
 )
 
 enum class VerificationStatus {
-    IDLE, VERIFYING, SUCCESS, FAILED_LOCATION, FAILED_TIME
+    IDLE, VERIFYING, SUCCESS, FAILED_LOCATION, FAILED_TIME, FAILED_ORIENTATION
 }
 
 class GameViewModel(
@@ -42,16 +45,23 @@ class GameViewModel(
         user?.id?.let { repository.getCurrentTarget(it) } ?: flowOf(null)
     }
 
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val groupsFlow: Flow<List<Group>> = repository.getCurrentUser().flatMapLatest { user ->
+        user?.id?.let { repository.getUserGroups(it) } ?: flowOf(emptyList())
+    }
+
     val uiState: StateFlow<GameUiState> = combine(
         repository.getCurrentUser(),
         currentTargetFlow,
         repository.getLeaderboard("global"),
+        groupsFlow,
         _internalState
-    ) { user, target, leaderboard, internal ->
+    ) { user, target, leaderboard, groups, internal ->
         internal.copy(
             currentUser = user,
             currentTarget = target,
             leaderboard = leaderboard,
+            userGroups = groups,
             isLoading = false
         )
     }.stateIn(
@@ -63,6 +73,20 @@ class GameViewModel(
     val snipeFeed: Flow<List<Snipe>> = repository.getSnipeFeed()
 
     fun getUserById(userId: String): Flow<User?> = repository.getUserById(userId)
+
+    fun onSignInAnonymously() {
+        viewModelScope.launch {
+            _internalState.update { it.copy(isAuthLoading = true) }
+            repository.signInAnonymously()
+            _internalState.update { it.copy(isAuthLoading = false) }
+        }
+    }
+
+    fun onSignOut() {
+        viewModelScope.launch {
+            repository.signOut()
+        }
+    }
 
     fun onLikeClicked(snipeId: String) {
         viewModelScope.launch {
@@ -76,10 +100,25 @@ class GameViewModel(
         }
     }
 
+    fun onJoinGroup(code: String) {
+        val userId = uiState.value.currentUser?.id ?: return
+        viewModelScope.launch {
+            repository.joinGroup(code, userId)
+        }
+    }
+
+    fun onCreateGroup(name: String) {
+        val userId = uiState.value.currentUser?.id ?: return
+        viewModelScope.launch {
+            repository.createGroup(name, userId)
+        }
+    }
+
     fun onCaptureButtonPressed(
         imageUrl: String,
         hunterLat: Double,
         hunterLon: Double,
+        hunterHeading: Double,
         capturedAt: Long
     ) {
         val hunter = uiState.value.currentUser ?: return
@@ -89,7 +128,7 @@ class GameViewModel(
 
         viewModelScope.launch {
             val result = repository.submitSnipe(
-                hunter.id, targetId, imageUrl, hunterLat, hunterLon, capturedAt
+                hunter.id, targetId, imageUrl, hunterLat, hunterLon, hunterHeading, capturedAt
             )
 
             result.onSuccess { points ->
@@ -103,6 +142,7 @@ class GameViewModel(
                 val status = when (error.message) {
                     "TOO_FAR" -> VerificationStatus.FAILED_LOCATION
                     "TOO_OLD" -> VerificationStatus.FAILED_TIME
+                    "WRONG_ORIENTATION" -> VerificationStatus.FAILED_ORIENTATION
                     else -> VerificationStatus.IDLE
                 }
                 _internalState.update { it.copy(verificationStatus = status) }
