@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "755455891296",
+    "firebase_url": "https://daat-799f7-default-rtdb.firebaseio.com",
+    "project_id": "daat-799f7",
+    "storage_bucket": "daat-799f7.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:755455891296:android:94e0a3836f22f77a3f7005",
+        "android_client_info": {
+          "package_name": "com.example.daat"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA8561UW6SYVhBwKs9hWUMktWxBtfrSUHE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
