@@ -28,7 +28,30 @@ class FakeGameRepository : GameRepository {
 
     override fun getLeaderboard(groupId: String): Flow<List<User>> = _leaderboard.asStateFlow()
 
-    override suspend fun submitSnipe(hunterId: String, targetId: String, imageUrl: String): Result<Unit> {
+    override suspend fun updateLocation(userId: String, latitude: Double, longitude: Double): Result<Unit> {
+        delay(500)
+        _currentUser.update { 
+            if (it?.id == userId) {
+                it.copy(
+                    latitude = latitude,
+                    longitude = longitude,
+                    lastLocationUpdate = System.currentTimeMillis()
+                )
+            } else {
+                it
+            }
+        }
+        return Result.success(Unit)
+    }
+
+    override suspend fun submitSnipe(
+        hunterId: String,
+        targetId: String,
+        imageUrl: String,
+        hunterLat: Double,
+        hunterLon: Double,
+        capturedAt: Long
+    ): Result<Unit> {
         delay(1000) // Simulate network
         _currentUser.update { it?.copy(totalScore = it?.totalScore?.plus(100) ?: 100) }
         return Result.success(Unit)
