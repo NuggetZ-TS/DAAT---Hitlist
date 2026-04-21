@@ -58,25 +58,16 @@ class FakeGameRepository : GameRepository {
         return Result.success(Unit)
     }
 
+    override suspend fun signInWithGoogle(idToken: String): Result<Unit> {
+        delay(500)
+        return Result.success(Unit)
+    }
+
     override suspend fun signOut(): Result<Unit> {
         delay(500)
         return Result.success(Unit)
     }
 
-<<<<<<< HEAD
-    override suspend fun updateLocation(userId: String, latitude: Double, longitude: Double): Result<Unit> {
-        delay(500)
-        _currentUser.update { 
-            if (it?.id == userId) {
-                it.copy(
-                    latitude = latitude,
-                    longitude = longitude,
-                    lastLocationUpdate = System.currentTimeMillis()
-                )
-            } else {
-                it
-            }
-=======
     override fun getCurrentTarget(userId: String): Flow<User?> {
         return _internalUsers.map { users ->
             val user = users.find { it.id == userId }
@@ -94,8 +85,10 @@ class FakeGameRepository : GameRepository {
 
     override suspend fun updateLocation(userId: String, latitude: Double, longitude: Double): Result<Unit> {
         _internalUsers.update { users ->
-            users.map { if (it.id == userId) it.copy(latitude = latitude, longitude = longitude, lastLocationUpdate = System.currentTimeMillis()) else it }
->>>>>>> 1e1e69af1b199ca3f1eee03c2522ddf5b15b689a
+            users.map { 
+                if (it.id == userId) it.copy(latitude = latitude, longitude = longitude, lastLocationUpdate = System.currentTimeMillis()) 
+                else it 
+            }
         }
         return Result.success(Unit)
     }
@@ -106,12 +99,6 @@ class FakeGameRepository : GameRepository {
         imageUrl: String,
         hunterLat: Double,
         hunterLon: Double,
-<<<<<<< HEAD
-        capturedAt: Long
-    ): Result<Unit> {
-        delay(1000) // Simulate network
-        _currentUser.update { it?.copy(totalScore = it?.totalScore?.plus(100) ?: 100) }
-=======
         hunterHeading: Double,
         capturedAt: Long
     ): Result<Int> {
@@ -171,6 +158,46 @@ class FakeGameRepository : GameRepository {
             }
         }
         return Result.success(points)
+    }
+
+    override suspend fun voteOnSnipe(snipeId: String, userId: String, isVerify: Boolean): Result<Unit> {
+        delay(300)
+        _snipes.update { snipes ->
+            snipes.map { snipe ->
+                if (snipe.id == snipeId) {
+                    if (isVerify) {
+                        snipe.copy(
+                            verifiedBy = (snipe.verifiedBy + userId).distinct(),
+                            rejectedBy = snipe.rejectedBy - userId
+                        )
+                    } else {
+                        snipe.copy(
+                            rejectedBy = (snipe.rejectedBy + userId).distinct(),
+                            verifiedBy = snipe.verifiedBy - userId
+                        )
+                    }
+                } else {
+                    snipe
+                }
+            }
+        }
+        return Result.success(Unit)
+    }
+
+    override suspend fun moderateSnipe(snipeId: String, adminId: String, isVerify: Boolean): Result<Unit> {
+        delay(300)
+        _snipes.update { snipes ->
+            snipes.map { snipe ->
+                if (snipe.id == snipeId) {
+                    snipe.copy(
+                        status = if (isVerify) SnipeStatus.VERIFIED else SnipeStatus.REJECTED
+                    )
+                } else {
+                    snipe
+                }
+            }
+        }
+        return Result.success(Unit)
     }
 
     override suspend fun assignDailyTargets(groupId: String): Result<Unit> {
@@ -265,7 +292,21 @@ class FakeGameRepository : GameRepository {
                 } else user
             }
         }
->>>>>>> 1e1e69af1b199ca3f1eee03c2522ddf5b15b689a
+        return Result.success(Unit)
+    }
+
+    override suspend fun spawnDummyTarget(): Result<Unit> {
+        delay(500)
+        _internalUsers.update { users ->
+            users.map { user ->
+                if (user.id == "user1") {
+                    user.copy(
+                        currentTargetId = "user2",
+                        targetAssignedAt = System.currentTimeMillis()
+                    )
+                } else user
+            }
+        }
         return Result.success(Unit)
     }
 }

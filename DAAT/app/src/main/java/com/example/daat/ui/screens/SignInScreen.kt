@@ -39,37 +39,35 @@ fun SignInScreen(viewModel: GameViewModel) {
             color = MaterialTheme.colorScheme.primary,
             letterSpacing = 4.sp
         )
-        Text(
-            text = "Digital Assassin & Tracking",
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.secondary,
-            fontWeight = FontWeight.Medium
-        )
         
         Spacer(modifier = Modifier.height(64.dp))
 
         if (uiState.isAuthLoading) {
             CircularProgressIndicator()
             Spacer(modifier = Modifier.height(16.dp))
-            Text("Connecting...", style = MaterialTheme.typography.labelMedium)
+            Text("Connecting to Firebase...", style = MaterialTheme.typography.labelMedium)
         } else {
             Button(
                 onClick = { viewModel.onSignInAnonymously() },
                 modifier = Modifier.fillMaxWidth().height(56.dp)
             ) {
-                Text("Sign in with Google")
+                Text("ENTER GAME")
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Guest button also calls onSignInAnonymously for now
-            TextButton(onClick = { viewModel.onSignInAnonymously() }) {
-                Text("Continue as Guest")
-            }
-            
             uiState.errorMessage?.let {
                 Spacer(modifier = Modifier.height(16.dp))
-                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                Text(
+                    text = "Error: $it", 
+                    color = MaterialTheme.colorScheme.error, 
+                    style = MaterialTheme.typography.bodySmall,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+                Text(
+                    text = "Make sure 'Anonymous' is enabled in Firebase Auth Console",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
             }
         }
     }

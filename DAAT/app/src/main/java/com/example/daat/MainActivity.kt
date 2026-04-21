@@ -1,18 +1,10 @@
 package com.example.daat
 
-import android.Manifest
 import android.os.Bundle
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-<<<<<<< HEAD
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-=======
 import androidx.compose.foundation.layout.*
->>>>>>> 1e1e69af1b199ca3f1eee03c2522ddf5b15b689a
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Home
@@ -35,61 +27,17 @@ import com.example.daat.ui.screens.ProfileScreen
 import com.example.daat.ui.screens.SignInScreen
 import com.example.daat.ui.theme.DAATTheme
 import com.example.daat.ui.viewmodel.GameViewModel
-import com.google.firebase.auth.FirebaseAuth
 
 class MainActivity : ComponentActivity() {
 
-    // ── Location setup ──────────────────────────────────────────
-    private lateinit var locationManager: LocationManager
-
-    private val locationPermissionRequest = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        if (isGranted) {
-            fetchLocation()
-        } else {
-            println("Location permission denied")
-        }
-    }
-
-    private fun fetchLocation() {
-        locationManager.getAndSaveLocation(
-            onSuccess = { lat, lng ->
-                println("Location saved to Firebase: $lat, $lng")
-            },
-            onFailure = { error ->
-                println("Error: $error")
-            }
-        )
-    }
-
-    fun startLocationFlow() {
-        locationPermissionRequest.launch(Manifest.permission.ACCESS_FINE_LOCATION)
-    }
-    // ────────────────────────────────────────────────────────────
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-<<<<<<< HEAD
-
-        // Initialize location manager
-        locationManager = LocationManager(this)
 
         enableEdgeToEdge()
         setContent {
             DAATTheme {
-                DAATApp(
-                    onRequestLocation = { startLocationFlow() } // pass it down to UI
-                )
-=======
-        
-        enableEdgeToEdge()
-        setContent {
-            DAATTheme {
-                // For development, we keep the toggle. 
-                // In production, useFirebase would be true by default.
-                var useFirebase by rememberSaveable { mutableStateOf(false) }
-                val auth = remember { FirebaseAuth.getInstance() }
+                // Default to Firebase for testing
+                var useFirebase by rememberSaveable { mutableStateOf(true) }
                 
                 val repository = remember(useFirebase) {
                     if (useFirebase) FirebaseGameRepository() else FakeGameRepository()
@@ -98,13 +46,10 @@ class MainActivity : ComponentActivity() {
                 val uiState by viewModel.uiState.collectAsState()
 
                 if (uiState.currentUser == null) {
-                    // Show Login Screen if no user is authenticated
                     SignInScreen(viewModel)
                 } else {
-                    // Show Main App if logged in
                     Scaffold(
                         bottomBar = {
-                            // Debug Toggle for Testing (Optional, can be removed later)
                             Surface(
                                 tonalElevation = 8.dp,
                                 modifier = Modifier.fillMaxWidth()
@@ -124,22 +69,17 @@ class MainActivity : ComponentActivity() {
                         }
                     ) { innerPadding ->
                         Box(modifier = Modifier.padding(innerPadding)) {
-                            DAATApp(viewModel)
+                            DAATApp(viewModel = viewModel)
                         }
                     }
                 }
->>>>>>> 1e1e69af1b199ca3f1eee03c2522ddf5b15b689a
             }
         }
     }
 }
 
 @Composable
-<<<<<<< HEAD
-fun DAATApp(onRequestLocation: () -> Unit = {}) {
-=======
 fun DAATApp(viewModel: GameViewModel) {
->>>>>>> 1e1e69af1b199ca3f1eee03c2522ddf5b15b689a
     var currentDestination by rememberSaveable { mutableStateOf(AppDestinations.HOME) }
 
     NavigationSuiteScaffold(
@@ -155,13 +95,6 @@ fun DAATApp(viewModel: GameViewModel) {
         }
     ) {
         Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-<<<<<<< HEAD
-            Greeting(
-                name = "Android",
-                modifier = Modifier.padding(innerPadding),
-                onGetLocation = onRequestLocation // wire up the button
-            )
-=======
             Box(modifier = Modifier.padding(innerPadding)) {
                 when (currentDestination) {
                     AppDestinations.HOME -> HomeScreen(viewModel)
@@ -170,7 +103,6 @@ fun DAATApp(viewModel: GameViewModel) {
                     AppDestinations.PROFILE -> ProfileScreen(viewModel)
                 }
             }
->>>>>>> 1e1e69af1b199ca3f1eee03c2522ddf5b15b689a
         }
     }
 }
@@ -184,30 +116,3 @@ enum class AppDestinations(
     LEADERBOARD("Ranking", Icons.Default.List),
     PROFILE("Profile", Icons.Default.AccountCircle),
 }
-<<<<<<< HEAD
-
-@Composable
-fun Greeting(
-    name: String,
-    modifier: Modifier = Modifier,
-    onGetLocation: () -> Unit = {}
-) {
-    androidx.compose.foundation.layout.Column(modifier = modifier) {
-        Text(text = "Hello $name!")
-
-        // Button to trigger location
-        androidx.compose.material3.Button(onClick = onGetLocation) {
-            Text("Get My Location")
-        }
-    }
-}
-
-@Preview(showBackground = true)
-@Composable
-fun GreetingPreview() {
-    DAATTheme {
-        Greeting("Android")
-    }
-}
-=======
->>>>>>> 1e1e69af1b199ca3f1eee03c2522ddf5b15b689a
