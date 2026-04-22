@@ -8,11 +8,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.GroupAdd
 import androidx.compose.material.icons.filled.Logout
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -99,20 +97,6 @@ fun ProfileScreen(viewModel: GameViewModel) {
             }
 
             item {
-                // Debug Tools
-                OutlinedButton(
-                    onClick = { viewModel.onSpawnDummyTarget() },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.tertiary)
-                ) {
-                    Icon(Icons.Default.BugReport, contentDescription = null)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("SPAWN DUMMY TARGET (TESTING)")
-                }
-            }
-
-            item {
                 // Groups Header
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -142,12 +126,7 @@ fun ProfileScreen(viewModel: GameViewModel) {
                 }
             } else {
                 items(uiState.userGroups) { group ->
-                    val isAdmin = group.adminId == user?.id
-                    GroupCard(
-                        group = group,
-                        isAdmin = isAdmin,
-                        onStartGame = { viewModel.onAssignNewTarget(group.id) }
-                    )
+                    GroupCard(group)
                 }
             }
         }
@@ -176,69 +155,41 @@ fun ProfileScreen(viewModel: GameViewModel) {
 }
 
 @Composable
-fun GroupCard(
-    group: Group,
-    isAdmin: Boolean,
-    onStartGame: () -> Unit
-) {
+fun GroupCard(group: Group) {
     val clipboardManager = LocalClipboardManager.current
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp)
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column {
-                    Text(text = group.name, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                    Text(text = "${group.members.size} Members", style = MaterialTheme.typography.labelSmall)
-                }
-
-                Surface(
-                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
-                    shape = RoundedCornerShape(8.dp),
-                    onClick = { clipboardManager.setText(AnnotatedString(group.inviteCode)) }
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = group.inviteCode,
-                            fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
-                    }
-                }
+        Row(
+            modifier = Modifier.padding(16.dp).fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column {
+                Text(text = group.name, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                Text(text = "${group.members.size} Members", style = MaterialTheme.typography.labelSmall)
             }
 
-            if (isAdmin) {
-                Spacer(modifier = Modifier.height(12.dp))
-                Button(
-                    onClick = onStartGame,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary)
+            Surface(
+                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
+                shape = RoundedCornerShape(8.dp),
+                onClick = { clipboardManager.setText(AnnotatedString(group.inviteCode)) }
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(Icons.Default.PlayArrow, contentDescription = null)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("START GAME / SHUFFLE TARGETS")
+                    Text(
+                        text = group.inviteCode,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
                 }
             }
         }
-    }
-}
-
-@Composable
-fun StatItem(label: String, value: String) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(text = value, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-        Text(text = label, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -290,4 +241,12 @@ fun JoinGroupDialog(onDismiss: () -> Unit, onJoin: (String) -> Unit) {
             TextButton(onClick = onDismiss) { Text("Cancel") }
         }
     )
+}
+
+@Composable
+fun StatItem(label: String, value: String) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(text = value, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+        Text(text = label, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+    }
 }
