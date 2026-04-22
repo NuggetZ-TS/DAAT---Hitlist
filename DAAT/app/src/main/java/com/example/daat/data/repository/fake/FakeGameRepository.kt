@@ -5,6 +5,7 @@ import com.example.daat.data.model.Snipe
 import com.example.daat.data.model.SnipeStatus
 import com.example.daat.data.model.User
 import com.example.daat.data.repository.GameRepository
+import com.example.daat.data.repository.SignInResult
 import com.example.daat.logic.ScoringManager
 import com.example.daat.logic.VerificationUtils
 import kotlinx.coroutines.delay
@@ -16,62 +17,109 @@ import kotlinx.coroutines.flow.update
 import java.util.UUID
 
 class FakeGameRepository : GameRepository {
-    private val _internalUsers = MutableStateFlow(listOf(
-        User(id = "user1", name = "Test User", username = "@tester", totalScore = 150, currentTargetId = "user2", targetAssignedAt = System.currentTimeMillis() - 3600000, latitude = 34.0522, longitude = -118.2430, groupIds = listOf("global")),
-        User(id = "user2", name = "Alice Smith", username = "@alice", totalScore = 450, latitude = 34.0522, longitude = -118.2437, groupIds = listOf("global")),
-        User(id = "user3", name = "Bob Jones", username = "@bob", totalScore = 50, latitude = 34.0522, longitude = -118.2438, groupIds = listOf("global"))
-    ))
+    private val _internalUsers = MutableStateFlow<List<User>>(emptyList())
+    private val _groups = MutableStateFlow<List<Group>>(emptyList())
+    private val _snipes = MutableStateFlow<List<Snipe>>(emptyList())
+    
+    // In-memory "database" for registered users to simulate persistence across logins
+    private val registeredUsers = mutableMapOf<String, User>()
 
-    private val _groups = MutableStateFlow(listOf(
-        Group(id = "global", name = "Global League", inviteCode = "GLOBAL", adminId = "system", members = listOf("user1", "user2", "user3"))
-    ))
-
-    private val _snipes = MutableStateFlow(listOf(
-        Snipe(
-            id = "s1",
-            hunterId = "user2",
-            targetId = "user1",
-            timestamp = System.currentTimeMillis() - 7200000,
-            imageUrl = "https://example.com/snipe1.jpg",
-            status = SnipeStatus.VERIFIED,
-            pointsAwarded = 120,
-            likes = 5,
-            isLikedByMe = false
-        ),
-        Snipe(
-            id = "s2",
-            hunterId = "user3",
-            targetId = "user2",
-            timestamp = System.currentTimeMillis() - 14400000,
-            imageUrl = "https://example.com/snipe2.jpg",
-            status = SnipeStatus.VERIFIED,
-            pointsAwarded = 95,
-            likes = 2,
-            isLikedByMe = true
+    private fun setupMockEnvironment(currentUser: User) {
+        val names = listOf("Bob", "Charlie", "Diana")
+        val baseLat = 34.0522
+        val baseLon = -118.2430
+        
+        val otherUsers = names.mapIndexed { i, name ->
+            val latOffset = (Math.random() - 0.5) * 0.0004 
+            val lonOffset = (Math.random() - 0.5) * 0.0004
+            User(
+                id = "user${i + 2}",
+                name = name,
+                username = "@${name.lowercase()}",
+                totalScore = (0..500).random(),
+                latitude = baseLat + latOffset,
+                longitude = baseLon + lonOffset,
+                groupIds = listOf("global"),
+                currentStreak = (0..5).random(),
+                targetAssignedAt = System.currentTimeMillis()
+            )
+        }
+        
+        val allUsers = listOf(currentUser) + otherUsers
+        
+        // Randomly assign targets to everyone
+        val userIds = allUsers.map { it.id }
+        val assignedUsers = allUsers.map { user ->
+            val targetId = userIds.filter { it != user.id }.random()
+            user.copy(currentTargetId = targetId)
+        }
+        
+        _internalUsers.value = assignedUsers
+        _groups.value = listOf(
+            Group(
+                id = "global",
+                name = "Global League",
+                inviteCode = "GLOBAL",
+                adminId = "system",
+                members = userIds
+            )
         )
-    ))
+        _snipes.value = emptyList()
+    }
 
-    override fun getCurrentUser(): Flow<User?> = _internalUsers.map { it.find { u -> u.id == "user1" } }
+    override fun getCurrentUser(): Flow<User?> = _internalUsers.map { it.find { u -> u.id.startsWith("google_") || u.id == "guest_user" } }
 
     override suspend fun signInAnonymously(): Result<Unit> {
         delay(500)
+        val guestUser = User(
+            id = "guest_user",
+            name = "Guest User",
+            username = "@guest",
+            groupIds = listOf("global")
+        )
+        setupMockEnvironment(guestUser)
         return Result.success(Unit)
     }
 
-    override suspend fun signInWithGoogle(idToken: String): Result<Unit> {
+    override suspend fun signInWithGoogle(idToken: String): Result<SignInResult> {
         delay(500)
+        // In a real app, the idToken would be used to get the Google ID and name
+        val googleId = "google_12345" 
+        val email = "test@gmail.com"
+        val name = "Google User"
+
+        val existingUser = registeredUsers[googleId]
+        return if (existingUser != null) {
+            setupMockEnvironment(existingUser)
+            Result.success(SignInResult.Success(existingUser))
+        } else {
+            Result.success(SignInResult.NeedsRegistration(googleId, email, name))
+        }
+    }
+
+    override suspend fun completeRegistration(userId: String, username: String, name: String): Result<Unit> {
+        delay(500)
+        val newUser = User(
+            id = userId,
+            name = name,
+            username = if (username.startsWith("@")) username else "@$username",
+            groupIds = listOf("global")
+        )
+        registeredUsers[userId] = newUser
+        setupMockEnvironment(newUser)
         return Result.success(Unit)
     }
 
     override suspend fun signOut(): Result<Unit> {
         delay(500)
+        _internalUsers.value = emptyList()
         return Result.success(Unit)
     }
 
     override fun getCurrentTarget(userId: String): Flow<User?> {
         return _internalUsers.map { users ->
             val user = users.find { it.id == userId }
-            users.find { it.id == user?.currentTargetId }?.toPublicProfile()
+            users.find { it.id == user?.currentTargetId }
         }
     }
 
@@ -85,10 +133,7 @@ class FakeGameRepository : GameRepository {
 
     override suspend fun updateLocation(userId: String, latitude: Double, longitude: Double): Result<Unit> {
         _internalUsers.update { users ->
-            users.map { 
-                if (it.id == userId) it.copy(latitude = latitude, longitude = longitude, lastLocationUpdate = System.currentTimeMillis()) 
-                else it 
-            }
+            users.map { if (it.id == userId) it.copy(latitude = latitude, longitude = longitude, lastLocationUpdate = System.currentTimeMillis()) else it }
         }
         return Result.success(Unit)
     }
@@ -143,9 +188,10 @@ class FakeGameRepository : GameRepository {
         
         _snipes.update { listOf(newSnipe) + it }
         _internalUsers.update { users ->
+            val userIds = users.map { it.id }
             users.map { user ->
                 if (user.id == hunterId) {
-                    val nextTargetId = if (targetId == "user2") "user3" else "user2"
+                    val nextTargetId = userIds.filter { it != hunterId && it != targetId }.random()
                     user.copy(
                         totalScore = user.totalScore + points,
                         currentStreak = user.currentStreak + 1,
@@ -160,53 +206,13 @@ class FakeGameRepository : GameRepository {
         return Result.success(points)
     }
 
-    override suspend fun voteOnSnipe(snipeId: String, userId: String, isVerify: Boolean): Result<Unit> {
-        delay(300)
-        _snipes.update { snipes ->
-            snipes.map { snipe ->
-                if (snipe.id == snipeId) {
-                    if (isVerify) {
-                        snipe.copy(
-                            verifiedBy = (snipe.verifiedBy + userId).distinct(),
-                            rejectedBy = snipe.rejectedBy - userId
-                        )
-                    } else {
-                        snipe.copy(
-                            rejectedBy = (snipe.rejectedBy + userId).distinct(),
-                            verifiedBy = snipe.verifiedBy - userId
-                        )
-                    }
-                } else {
-                    snipe
-                }
-            }
-        }
-        return Result.success(Unit)
-    }
-
-    override suspend fun moderateSnipe(snipeId: String, adminId: String, isVerify: Boolean): Result<Unit> {
-        delay(300)
-        _snipes.update { snipes ->
-            snipes.map { snipe ->
-                if (snipe.id == snipeId) {
-                    snipe.copy(
-                        status = if (isVerify) SnipeStatus.VERIFIED else SnipeStatus.REJECTED
-                    )
-                } else {
-                    snipe
-                }
-            }
-        }
-        return Result.success(Unit)
-    }
-
     override suspend fun assignDailyTargets(groupId: String): Result<Unit> {
         delay(500)
         _internalUsers.update { users ->
+            val userIds = users.map { it.id }
             users.map { user ->
                 if (user.groupIds.contains(groupId)) {
-                    val currentTarget = user.currentTargetId
-                    val nextTarget = if (currentTarget == "user2") "user3" else "user2"
+                    val nextTarget = userIds.filter { it != user.id }.random()
                     user.copy(
                         currentTargetId = nextTarget,
                         targetAssignedAt = System.currentTimeMillis()
@@ -248,18 +254,18 @@ class FakeGameRepository : GameRepository {
         delay(500)
         val inviteCode = (1..6).map { ('A'..'Z').random() }.joinToString("")
         val groupId = UUID.randomUUID().toString()
-        val mockMembers = listOf(adminId, "user2", "user3")
+        val members = _internalUsers.value.map { it.id }
         val newGroup = Group(
             id = groupId,
             name = name,
             inviteCode = inviteCode,
             adminId = adminId,
-            members = mockMembers
+            members = members
         )
         _groups.update { it + newGroup }
         _internalUsers.update { users ->
             users.map { user ->
-                if (mockMembers.contains(user.id)) {
+                if (members.contains(user.id)) {
                     user.copy(groupIds = (user.groupIds + groupId).distinct())
                 } else user
             }
@@ -289,21 +295,6 @@ class FakeGameRepository : GameRepository {
             users.map { user ->
                 if (user.id == userId) {
                     user.copy(groupIds = (user.groupIds + groupId).distinct())
-                } else user
-            }
-        }
-        return Result.success(Unit)
-    }
-
-    override suspend fun spawnDummyTarget(): Result<Unit> {
-        delay(500)
-        _internalUsers.update { users ->
-            users.map { user ->
-                if (user.id == "user1") {
-                    user.copy(
-                        currentTargetId = "user2",
-                        targetAssignedAt = System.currentTimeMillis()
-                    )
                 } else user
             }
         }

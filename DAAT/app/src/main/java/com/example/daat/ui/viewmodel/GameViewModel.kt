@@ -6,9 +6,10 @@ import com.example.daat.data.model.Group
 import com.example.daat.data.model.Snipe
 import com.example.daat.data.model.User
 import com.example.daat.data.repository.GameRepository
+import com.example.daat.data.repository.SignInResult
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -29,11 +30,17 @@ data class GameUiState(
     val lastPointsAwarded: Int? = null,
     val userGroups: List<Group> = emptyList(),
     val isAuthLoading: Boolean = false,
-    val selectedGroupId: String = "global"
+    val registrationData: RegistrationData? = null
+)
+
+data class RegistrationData(
+    val userId: String,
+    val email: String?,
+    val defaultName: String?
 )
 
 enum class VerificationStatus {
-    IDLE, VERIFYING, SUCCESS, FAILED_LOCATION, FAILED_TIME, FAILED_ORIENTATION, FAILED_NETWORK
+    IDLE, VERIFYING, SUCCESS, FAILED_LOCATION, FAILED_TIME, FAILED_ORIENTATION
 }
 
 class GameViewModel(
@@ -42,25 +49,31 @@ class GameViewModel(
 
     private val _internalState = MutableStateFlow(GameUiState(isLoading = true))
 
-    @OptIn(ExperimentalCoroutinesApi::class)
-    private val currentTargetFlow: Flow<User?> = repository.getCurrentUser().flatMapLatest { user ->
-        user?.id?.let { repository.getCurrentTarget(it) } ?: flowOf(null)
-    }
+    // ── Events ────────────────────────────────────────────────────
+    // Emits Unit whenever a snipe succeeds — MainActivity listens to
+    // this to trigger a fresh GPS fetch and save to Firebase.
+    val onSnipeSuccessEvent = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
+    // Emits Unit when a user fully logs in (Google or anonymous) so
+    // MainActivity can trigger the first location save.
+    val onLoginSuccessEvent = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
 
     @OptIn(ExperimentalCoroutinesApi::class)
-    private val groupsFlow: Flow<List<Group>> = repository.getCurrentUser().flatMapLatest { user ->
-        user?.id?.let { repository.getUserGroups(it) } ?: flowOf(emptyList())
-    }
+    private val currentTargetFlow: Flow<User?> =
+        repository.getCurrentUser().flatMapLatest { user ->
+            user?.id?.let { repository.getCurrentTarget(it) } ?: flowOf(null)
+        }
 
     @OptIn(ExperimentalCoroutinesApi::class)
-    private val leaderboardFlow: Flow<List<User>> = _internalState.flatMapLatest { state ->
-        repository.getLeaderboard(state.selectedGroupId)
-    }
+    private val groupsFlow: Flow<List<Group>> =
+        repository.getCurrentUser().flatMapLatest { user ->
+            user?.id?.let { repository.getUserGroups(it) } ?: flowOf(emptyList())
+        }
 
     val uiState: StateFlow<GameUiState> = combine(
         repository.getCurrentUser(),
         currentTargetFlow,
-        leaderboardFlow,
+        repository.getLeaderboard("global"),
         groupsFlow,
         _internalState
     ) { user, target, leaderboard, groups, internal ->
@@ -81,15 +94,15 @@ class GameViewModel(
 
     fun getUserById(userId: String): Flow<User?> = repository.getUserById(userId)
 
-    fun onSelectGroup(groupId: String) {
-        _internalState.update { it.copy(selectedGroupId = groupId) }
-    }
+    // ── Auth ──────────────────────────────────────────────────────
 
     fun onSignInAnonymously() {
         viewModelScope.launch {
-            _internalState.update { it.copy(isAuthLoading = true, errorMessage = null) }
+            _internalState.update { it.copy(isAuthLoading = true) }
             val result = repository.signInAnonymously()
-            result.onFailure { error ->
+            result.onSuccess {
+                onLoginSuccessEvent.tryEmit(Unit)
+            }.onFailure { error ->
                 _internalState.update { it.copy(errorMessage = error.message) }
             }
             _internalState.update { it.copy(isAuthLoading = false) }
@@ -100,63 +113,75 @@ class GameViewModel(
         viewModelScope.launch {
             _internalState.update { it.copy(isAuthLoading = true, errorMessage = null) }
             val result = repository.signInWithGoogle(idToken)
-            result.onFailure { error ->
+            result.onSuccess { signInResult ->
+                when (signInResult) {
+                    is SignInResult.Success -> {
+                        // Returning user — Firebase will update getCurrentUser() flow,
+                        // fire login event so MainActivity saves location
+                        onLoginSuccessEvent.tryEmit(Unit)
+                    }
+                    is SignInResult.NeedsRegistration -> {
+                        // New user — show registration dialog
+                        _internalState.update {
+                            it.copy(
+                                registrationData = RegistrationData(
+                                    userId = signInResult.userId,
+                                    email = signInResult.email,
+                                    defaultName = signInResult.name
+                                )
+                            )
+                        }
+                    }
+                }
+            }.onFailure { error ->
                 _internalState.update { it.copy(errorMessage = error.message) }
             }
             _internalState.update { it.copy(isAuthLoading = false) }
         }
     }
 
-    fun onSignOut() {
+    fun onCompleteRegistration(username: String, name: String) {
+        val data = _internalState.value.registrationData ?: return
         viewModelScope.launch {
-            repository.signOut()
+            _internalState.update { it.copy(isAuthLoading = true) }
+            val result = repository.completeRegistration(data.userId, username, name)
+            result.onSuccess {
+                _internalState.update { it.copy(registrationData = null) }
+                // New user just finished registration — save their location too
+                onLoginSuccessEvent.tryEmit(Unit)
+            }.onFailure { error ->
+                _internalState.update { it.copy(errorMessage = error.message) }
+            }
+            _internalState.update { it.copy(isAuthLoading = false) }
         }
     }
+
+    fun onCancelRegistration() {
+        _internalState.update { it.copy(registrationData = null) }
+    }
+
+    fun onSignOut() {
+        viewModelScope.launch { repository.signOut() }
+    }
+
+    // ── Game actions ──────────────────────────────────────────────
 
     fun onLikeClicked(snipeId: String) {
-        viewModelScope.launch {
-            repository.toggleLike(snipeId)
-        }
+        viewModelScope.launch { repository.toggleLike(snipeId) }
     }
 
-    fun onUpdateLocation(lat: Double, lon: Double) {
-        val userId = uiState.value.currentUser?.id ?: return
-        viewModelScope.launch {
-            repository.updateLocation(userId, lat, lon)
-        }
-    }
-
-    fun onAssignNewTarget(groupId: String) {
-        viewModelScope.launch {
-            repository.assignDailyTargets(groupId)
-        }
+    fun onAssignNewTarget() {
+        viewModelScope.launch { repository.assignDailyTargets("global") }
     }
 
     fun onJoinGroup(code: String) {
         val userId = uiState.value.currentUser?.id ?: return
-        viewModelScope.launch {
-            repository.joinGroup(code, userId)
-        }
+        viewModelScope.launch { repository.joinGroup(code, userId) }
     }
 
     fun onCreateGroup(name: String) {
         val userId = uiState.value.currentUser?.id ?: return
-        viewModelScope.launch {
-            repository.createGroup(name, userId)
-        }
-    }
-
-    fun onSpawnDummyTarget() {
-        viewModelScope.launch {
-            repository.spawnDummyTarget()
-        }
-    }
-
-    fun onVoteOnSnipe(snipeId: String, isVerify: Boolean) {
-        val userId = uiState.value.currentUser?.id ?: return
-        viewModelScope.launch {
-            repository.voteOnSnipe(snipeId, userId, isVerify)
-        }
+        viewModelScope.launch { repository.createGroup(name, userId) }
     }
 
     fun onCaptureButtonPressed(
@@ -172,32 +197,33 @@ class GameViewModel(
         _internalState.update { it.copy(verificationStatus = VerificationStatus.VERIFYING) }
 
         viewModelScope.launch {
-            try {
-                val result = repository.submitSnipe(
-                    hunter.id, targetId, imageUrl, hunterLat, hunterLon, hunterHeading, capturedAt
-                )
+            val result = repository.submitSnipe(
+                hunterId = hunter.id,
+                targetId = targetId,
+                imageUrl = imageUrl,
+                hunterLat = hunterLat,
+                hunterLon = hunterLon,
+                hunterHeading = hunterHeading,
+                capturedAt = capturedAt
+            )
 
-                result.onSuccess { points ->
-                    _internalState.update {
-                        it.copy(
-                            verificationStatus = VerificationStatus.SUCCESS,
-                            lastPointsAwarded = points
-                        )
-                    }
-                }.onFailure { error ->
-                    val status = when (error.message) {
-                        "TOO_FAR" -> VerificationStatus.FAILED_LOCATION
-                        "TOO_OLD" -> VerificationStatus.FAILED_TIME
-                        "WRONG_ORIENTATION" -> VerificationStatus.FAILED_ORIENTATION
-                        "FILE_NOT_FOUND" -> VerificationStatus.IDLE
-                        else -> VerificationStatus.FAILED_NETWORK
-                    }
-                    _internalState.update { it.copy(verificationStatus = status) }
+            result.onSuccess { points ->
+                _internalState.update {
+                    it.copy(
+                        verificationStatus = VerificationStatus.SUCCESS,
+                        lastPointsAwarded = points
+                    )
                 }
-            } catch (e: TimeoutCancellationException) {
-                _internalState.update { it.copy(verificationStatus = VerificationStatus.FAILED_NETWORK) }
-            } catch (e: Exception) {
-                _internalState.update { it.copy(verificationStatus = VerificationStatus.IDLE) }
+                // Fire event so MainActivity saves fresh location after a successful snipe
+                onSnipeSuccessEvent.tryEmit(Unit)
+            }.onFailure { error ->
+                val status = when (error.message) {
+                    "TOO_FAR"          -> VerificationStatus.FAILED_LOCATION
+                    "TOO_OLD"          -> VerificationStatus.FAILED_TIME
+                    "WRONG_ORIENTATION" -> VerificationStatus.FAILED_ORIENTATION
+                    else               -> VerificationStatus.IDLE
+                }
+                _internalState.update { it.copy(verificationStatus = status) }
             }
         }
     }

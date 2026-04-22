@@ -9,7 +9,8 @@ interface GameRepository {
     // Auth
     fun getCurrentUser(): Flow<User?>
     suspend fun signInAnonymously(): Result<Unit>
-    suspend fun signInWithGoogle(idToken: String): Result<Unit>
+    suspend fun signInWithGoogle(idToken: String): Result<SignInResult>
+    suspend fun completeRegistration(userId: String, username: String, name: String): Result<Unit>
     suspend fun signOut(): Result<Unit>
 
     // Game
@@ -29,13 +30,9 @@ interface GameRepository {
         imageUrl: String,
         hunterLat: Double,
         hunterLon: Double,
-        hunterHeading: Double,
+        hunterHeading: Double, // New parameter for orientation verification
         capturedAt: Long
     ): Result<Int>
-
-    suspend fun voteOnSnipe(snipeId: String, userId: String, isVerify: Boolean): Result<Unit>
-    
-    suspend fun moderateSnipe(snipeId: String, adminId: String, isVerify: Boolean): Result<Unit>
 
     suspend fun assignDailyTargets(groupId: String): Result<Unit>
     
@@ -47,7 +44,9 @@ interface GameRepository {
     fun getUserGroups(userId: String): Flow<List<Group>>
     suspend fun createGroup(name: String, adminId: String): Result<String>
     suspend fun joinGroup(inviteCode: String, userId: String): Result<Unit>
+}
 
-    // Testing / Debug
-    suspend fun spawnDummyTarget(): Result<Unit>
+sealed class SignInResult {
+    data class Success(val user: User) : SignInResult()
+    data class NeedsRegistration(val userId: String, val email: String?, val name: String?) : SignInResult()
 }
