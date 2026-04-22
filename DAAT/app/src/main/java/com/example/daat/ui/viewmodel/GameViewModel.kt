@@ -7,6 +7,7 @@ import com.example.daat.data.model.Snipe
 import com.example.daat.data.model.User
 import com.example.daat.data.repository.GameRepository
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -27,11 +28,12 @@ data class GameUiState(
     val verificationStatus: VerificationStatus = VerificationStatus.IDLE,
     val lastPointsAwarded: Int? = null,
     val userGroups: List<Group> = emptyList(),
-    val isAuthLoading: Boolean = false
+    val isAuthLoading: Boolean = false,
+    val selectedGroupId: String = "global"
 )
 
 enum class VerificationStatus {
-    IDLE, VERIFYING, SUCCESS, FAILED_LOCATION, FAILED_TIME, FAILED_ORIENTATION
+    IDLE, VERIFYING, SUCCESS, FAILED_LOCATION, FAILED_TIME, FAILED_ORIENTATION, FAILED_NETWORK
 }
 
 class GameViewModel(
@@ -50,10 +52,15 @@ class GameViewModel(
         user?.id?.let { repository.getUserGroups(it) } ?: flowOf(emptyList())
     }
 
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val leaderboardFlow: Flow<List<User>> = _internalState.flatMapLatest { state ->
+        repository.getLeaderboard(state.selectedGroupId)
+    }
+
     val uiState: StateFlow<GameUiState> = combine(
         repository.getCurrentUser(),
         currentTargetFlow,
-        repository.getLeaderboard("global"),
+        leaderboardFlow,
         groupsFlow,
         _internalState
     ) { user, target, leaderboard, groups, internal ->
@@ -74,10 +81,28 @@ class GameViewModel(
 
     fun getUserById(userId: String): Flow<User?> = repository.getUserById(userId)
 
+    fun onSelectGroup(groupId: String) {
+        _internalState.update { it.copy(selectedGroupId = groupId) }
+    }
+
     fun onSignInAnonymously() {
         viewModelScope.launch {
-            _internalState.update { it.copy(isAuthLoading = true) }
-            repository.signInAnonymously()
+            _internalState.update { it.copy(isAuthLoading = true, errorMessage = null) }
+            val result = repository.signInAnonymously()
+            result.onFailure { error ->
+                _internalState.update { it.copy(errorMessage = error.message) }
+            }
+            _internalState.update { it.copy(isAuthLoading = false) }
+        }
+    }
+
+    fun onSignInWithGoogle(idToken: String) {
+        viewModelScope.launch {
+            _internalState.update { it.copy(isAuthLoading = true, errorMessage = null) }
+            val result = repository.signInWithGoogle(idToken)
+            result.onFailure { error ->
+                _internalState.update { it.copy(errorMessage = error.message) }
+            }
             _internalState.update { it.copy(isAuthLoading = false) }
         }
     }
@@ -94,9 +119,16 @@ class GameViewModel(
         }
     }
 
-    fun onAssignNewTarget() {
+    fun onUpdateLocation(lat: Double, lon: Double) {
+        val userId = uiState.value.currentUser?.id ?: return
         viewModelScope.launch {
-            repository.assignDailyTargets("global")
+            repository.updateLocation(userId, lat, lon)
+        }
+    }
+
+    fun onAssignNewTarget(groupId: String) {
+        viewModelScope.launch {
+            repository.assignDailyTargets(groupId)
         }
     }
 
@@ -114,6 +146,19 @@ class GameViewModel(
         }
     }
 
+    fun onSpawnDummyTarget() {
+        viewModelScope.launch {
+            repository.spawnDummyTarget()
+        }
+    }
+
+    fun onVoteOnSnipe(snipeId: String, isVerify: Boolean) {
+        val userId = uiState.value.currentUser?.id ?: return
+        viewModelScope.launch {
+            repository.voteOnSnipe(snipeId, userId, isVerify)
+        }
+    }
+
     fun onCaptureButtonPressed(
         imageUrl: String,
         hunterLat: Double,
@@ -127,25 +172,32 @@ class GameViewModel(
         _internalState.update { it.copy(verificationStatus = VerificationStatus.VERIFYING) }
 
         viewModelScope.launch {
-            val result = repository.submitSnipe(
-                hunter.id, targetId, imageUrl, hunterLat, hunterLon, hunterHeading, capturedAt
-            )
+            try {
+                val result = repository.submitSnipe(
+                    hunter.id, targetId, imageUrl, hunterLat, hunterLon, hunterHeading, capturedAt
+                )
 
-            result.onSuccess { points ->
-                _internalState.update {
-                    it.copy(
-                        verificationStatus = VerificationStatus.SUCCESS,
-                        lastPointsAwarded = points
-                    )
+                result.onSuccess { points ->
+                    _internalState.update {
+                        it.copy(
+                            verificationStatus = VerificationStatus.SUCCESS,
+                            lastPointsAwarded = points
+                        )
+                    }
+                }.onFailure { error ->
+                    val status = when (error.message) {
+                        "TOO_FAR" -> VerificationStatus.FAILED_LOCATION
+                        "TOO_OLD" -> VerificationStatus.FAILED_TIME
+                        "WRONG_ORIENTATION" -> VerificationStatus.FAILED_ORIENTATION
+                        "FILE_NOT_FOUND" -> VerificationStatus.IDLE
+                        else -> VerificationStatus.FAILED_NETWORK
+                    }
+                    _internalState.update { it.copy(verificationStatus = status) }
                 }
-            }.onFailure { error ->
-                val status = when (error.message) {
-                    "TOO_FAR" -> VerificationStatus.FAILED_LOCATION
-                    "TOO_OLD" -> VerificationStatus.FAILED_TIME
-                    "WRONG_ORIENTATION" -> VerificationStatus.FAILED_ORIENTATION
-                    else -> VerificationStatus.IDLE
-                }
-                _internalState.update { it.copy(verificationStatus = status) }
+            } catch (e: TimeoutCancellationException) {
+                _internalState.update { it.copy(verificationStatus = VerificationStatus.FAILED_NETWORK) }
+            } catch (e: Exception) {
+                _internalState.update { it.copy(verificationStatus = VerificationStatus.IDLE) }
             }
         }
     }

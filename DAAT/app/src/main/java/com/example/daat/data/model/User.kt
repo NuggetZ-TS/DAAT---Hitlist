@@ -7,18 +7,20 @@ data class User(
     val profileImageUrl: String? = null,
     val totalScore: Int = 0,
     val currentTargetId: String? = null,
+    val currentTargetGroupId: String? = null, // Track which group assigned this target
     val targetAssignedAt: Long? = null,
     val currentStreak: Int = 0,
     val latitude: Double? = null,
     val longitude: Double? = null,
     val lastLocationUpdate: Long? = null,
-    val groupIds: List<String> = emptyList() // List of groups the user has joined
+    val groupIds: List<String> = emptyList()
 ) {
     fun toPublicProfile() = copy(
         latitude = null,
         longitude = null,
         lastLocationUpdate = null,
         currentTargetId = null,
+        currentTargetGroupId = null,
         targetAssignedAt = null
     )
 }
