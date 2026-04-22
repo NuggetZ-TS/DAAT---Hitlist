@@ -1,45 +1,96 @@
 package com.example.daat
 
+import android.annotation.SuppressLint
 import android.content.Context
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 import com.google.firebase.firestore.FirebaseFirestore
 
-class LocationManager(private val context: Context) {
+class LocationManager(private val context: Context) : SensorEventListener {
 
     private val db = FirebaseFirestore.getInstance()
+    private val fusedLocationClient = LocationServices.getFusedLocationProviderClient(context)
+    private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+    private val rotationSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
 
+    private var currentHeading = 0.0
+
+    /** One-shot fetch + save — used on login and snipe events. */
+    @SuppressLint("MissingPermission")
     fun getAndSaveLocation(
-        onSuccess: (lat: Double, lng: Double) -> Unit,
+        onSuccess: (lat: Double, lng: Double, heading: Double) -> Unit,
         onFailure: (String) -> Unit
     ) {
-        // Dummy location (New York City) for testing
-        val dummyLat = 40.7128
-        val dummyLng = -74.0060
-
-        saveLocationToFirebase(dummyLat, dummyLng, onSuccess, onFailure)
+        fusedLocationClient.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, null)
+            .addOnSuccessListener { location ->
+                if (location != null) {
+                    saveLocationToFirebase(location.latitude, location.longitude, currentHeading, onSuccess, onFailure)
+                } else {
+                    onFailure("Failed to get location: location is null")
+                }
+            }
+            .addOnFailureListener { e ->
+                onFailure("Failed to get location: ${e.message}")
+            }
     }
 
     private fun saveLocationToFirebase(
         lat: Double,
         lng: Double,
-        onSuccess: (Double, Double) -> Unit,
+        heading: Double,
+        onSuccess: (Double, Double, Double) -> Unit,
         onFailure: (String) -> Unit
     ) {
         val locationData = hashMapOf(
             "latitude" to lat,
             "longitude" to lng,
-            "timestamp" to System.currentTimeMillis(),
-            "note" to "dummy test location"
+            "heading" to heading,
+            "timestamp" to System.currentTimeMillis()
         )
 
         db.collection("locations")
             .add(locationData)
             .addOnSuccessListener {
-                println("Firebase save SUCCESS: $lat, $lng")
-                onSuccess(lat, lng)
+                onSuccess(lat, lng, heading)
             }
             .addOnFailureListener { e ->
-                println("Firebase save FAILED: ${e.message}")
                 onFailure("Firebase save failed: ${e.message}")
             }
     }
+
+    fun startOrientationUpdates() {
+        rotationSensor?.let {
+            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
+        }
+    }
+
+    fun stopOrientationUpdates() {
+        sensorManager.unregisterListener(this)
+    }
+
+    // Passive updates can be implemented if needed for background tracking
+    fun startPassiveLocationUpdates() {
+        // Implementation for background updates if required
+    }
+
+    fun stopPassiveLocationUpdates() {
+        // Implementation for background updates if required
+    }
+
+    override fun onSensorChanged(event: SensorEvent?) {
+        if (event?.sensor?.type == Sensor.TYPE_ROTATION_VECTOR) {
+            val rotationMatrix = FloatArray(9)
+            SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
+            val orientation = FloatArray(3)
+            SensorManager.getOrientation(rotationMatrix, orientation)
+            val azimuthDegrees = Math.toDegrees(orientation[0].toDouble())
+            currentHeading = (azimuthDegrees + 360) % 360
+        }
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 }

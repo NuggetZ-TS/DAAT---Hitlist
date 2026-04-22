@@ -8,8 +8,10 @@ import com.example.daat.data.model.User
 import com.example.daat.logic.ScoringManager
 import com.example.daat.logic.VerificationUtils
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
+import com.google.firebase.firestore.SetOptions
 import com.google.firebase.storage.FirebaseStorage
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -36,30 +38,67 @@ class FirebaseGameRepository : GameRepository {
                     val user = snapshot.toObject(User::class.java)
                     trySend(user)
                 } else {
-                    // If document doesn't exist, try to create a default one
-                    // In a real app, this should be handled during a "Sign Up" flow
-                    createDefaultUser(userId)
+                    // We don't automatically create a user here anymore to allow for registration flow
                     trySend(null)
                 }
             }
         awaitClose { listener.remove() }
     }
 
-    private fun createDefaultUser(userId: String) {
-        val email = auth.currentUser?.email ?: "Guest"
-        val newUser = User(
-            id = userId,
-            name = email.substringBefore("@"),
-            username = "@${email.substringBefore("@").lowercase()}",
-            totalScore = 0,
-            groupIds = listOf("global") // Everyone starts in global
-        )
-        db.collection("users").document(userId).set(newUser)
-    }
-
     override suspend fun signInAnonymously(): Result<Unit> {
         return try {
-            auth.signInAnonymously().await()
+            val result = auth.signInAnonymously().await()
+            val userId = result.user?.uid ?: throw Exception("Auth failed")
+            
+            // For anonymous users, we can create a default profile immediately
+            val newUser = User(
+                id = userId,
+                name = "Guest",
+                username = "@guest_${userId.takeLast(4)}",
+                totalScore = 0,
+                groupIds = listOf("global")
+            )
+            db.collection("users").document(userId).set(newUser).await()
+            
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun signInWithGoogle(idToken: String): Result<SignInResult> {
+        return try {
+            val credential = GoogleAuthProvider.getCredential(idToken, null)
+            val authResult = auth.signInWithCredential(credential).await()
+            val firebaseUser = authResult.user ?: throw Exception("Google Auth failed")
+            
+            val userDoc = db.collection("users").document(firebaseUser.uid).get().await()
+            
+            if (userDoc.exists()) {
+                val user = userDoc.toObject(User::class.java)!!
+                Result.success(SignInResult.Success(user))
+            } else {
+                Result.success(SignInResult.NeedsRegistration(
+                    userId = firebaseUser.uid,
+                    email = firebaseUser.email,
+                    name = firebaseUser.displayName
+                ))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun completeRegistration(userId: String, username: String, name: String): Result<Unit> {
+        return try {
+            val newUser = User(
+                id = userId,
+                name = name,
+                username = if (username.startsWith("@")) username else "@$username",
+                totalScore = 0,
+                groupIds = listOf("global")
+            )
+            db.collection("users").document(userId).set(newUser).await()
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)
@@ -140,14 +179,12 @@ class FirebaseGameRepository : GameRepository {
         capturedAt: Long
     ): Result<Int> {
         return try {
-            // 1. Fetch Target Location from Firestore
             val targetDoc = db.collection("users").document(targetId).get().await()
             val target = targetDoc.toObject(User::class.java) ?: throw Exception("TARGET_NOT_FOUND")
             
             val targetLat = target.latitude ?: 0.0
             val targetLon = target.longitude ?: 0.0
 
-            // 2. Perform Verification
             val distance = VerificationUtils.calculateDistance(hunterLat, hunterLon, targetLat, targetLon)
             if (distance > 50.0) throw Exception("TOO_FAR")
 
@@ -156,13 +193,11 @@ class FirebaseGameRepository : GameRepository {
                 throw Exception("WRONG_ORIENTATION")
             }
 
-            // 3. Upload Image to Firebase Storage
             val fileName = "snipes/${UUID.randomUUID()}.jpg"
             val storageRef = storage.reference.child(fileName)
             storageRef.putFile(Uri.parse(imageUrl)).await()
             val downloadUrl = storageRef.downloadUrl.await().toString()
 
-            // 4. Calculate Points
             val hunterDoc = db.collection("users").document(hunterId).get().await()
             val hunter = hunterDoc.toObject(User::class.java) ?: throw Exception("HUNTER_NOT_FOUND")
             
@@ -173,7 +208,6 @@ class FirebaseGameRepository : GameRepository {
                 capturedAt = capturedAt
             )
 
-            // 5. Save Snipe to Firestore
             val snipeId = UUID.randomUUID().toString()
             val newSnipe = Snipe(
                 id = snipeId,
@@ -186,12 +220,14 @@ class FirebaseGameRepository : GameRepository {
             )
             db.collection("snipes").document(snipeId).set(newSnipe).await()
 
-            // 6. Update Hunter Stats & Rotate Target
-            // For now, rotation is hardcoded to a simple logic
+            // Update Hunter Stats, Rotation, and current Location in DB
             db.collection("users").document(hunterId).update(mapOf(
                 "totalScore" to (hunter.totalScore + points),
                 "currentStreak" to (hunter.currentStreak + 1),
-                "currentTargetId" to null // Clear target after successful snipe
+                "currentTargetId" to null,
+                "latitude" to hunterLat,
+                "longitude" to hunterLon,
+                "lastLocationUpdate" to System.currentTimeMillis()
             )).await()
 
             Result.success(points)
@@ -201,7 +237,6 @@ class FirebaseGameRepository : GameRepository {
     }
 
     override suspend fun assignDailyTargets(groupId: String): Result<Unit> {
-        // This really needs to be a Cloud Function for security
         return Result.failure(Exception("Not implemented locally for Firebase. Use Cloud Functions."))
     }
 
@@ -214,7 +249,6 @@ class FirebaseGameRepository : GameRepository {
     }
 
     override suspend fun toggleLike(snipeId: String): Result<Unit> {
-        // Simple increment for now
         return try {
             db.collection("snipes").document(snipeId)
                 .update("likes", com.google.firebase.firestore.FieldValue.increment(1))
@@ -248,7 +282,6 @@ class FirebaseGameRepository : GameRepository {
             )
             docRef.set(group).await()
             
-            // Update user document
             val userRef = db.collection("users").document(adminId)
             db.runTransaction { transaction ->
                 val user = transaction.get(userRef).toObject(User::class.java)
@@ -282,10 +315,8 @@ class FirebaseGameRepository : GameRepository {
             }
 
             db.runTransaction { transaction ->
-                // Update group members
                 transaction.update(groupDoc.reference, "members", members + userId)
                 
-                // Update user groupIds
                 val userRef = db.collection("users").document(userId)
                 val user = transaction.get(userRef).toObject(User::class.java)
                 val newGroupIds = (user?.groupIds ?: emptyList()) + groupId

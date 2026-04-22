@@ -1,6 +1,7 @@
 package com.example.daat.ui.screens
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -41,7 +42,9 @@ import com.example.daat.ui.viewmodel.GameViewModel
 import com.example.daat.ui.viewmodel.VerificationStatus
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
-import com.google.accompanist.permissions.rememberPermissionState
+import com.google.accompanist.permissions.rememberMultiplePermissionsState
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
@@ -52,12 +55,20 @@ import kotlin.math.abs
 @Composable
 fun HomeScreen(viewModel: GameViewModel) {
     val uiState by viewModel.uiState.collectAsState()
-    val cameraPermissionState = rememberPermissionState(Manifest.permission.CAMERA)
+    val permissionsState = rememberMultiplePermissionsState(
+        listOf(
+            Manifest.permission.CAMERA,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+        )
+    )
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
+    val fusedLocationClient = remember { LocationServices.getFusedLocationProviderClient(context) }
     
     // Compass/Heading tracking
-    var currentHeading by remember { mutableStateOf(0.0) }
+    var currentHeading by remember { mutableDoubleStateOf(0.0) }
+    var currentUserLocation by remember { mutableStateOf<android.location.Location?>(null) }
     
     DisposableEffect(Unit) {
         val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -71,7 +82,6 @@ fun HomeScreen(viewModel: GameViewModel) {
                     val orientation = FloatArray(3)
                     SensorManager.getOrientation(rotationMatrix, orientation)
                     
-                    // Convert azimuth to degrees (0 to 360)
                     val azimuthDegrees = Math.toDegrees(orientation[0].toDouble())
                     currentHeading = (azimuthDegrees + 360) % 360
                 }
@@ -86,7 +96,23 @@ fun HomeScreen(viewModel: GameViewModel) {
         }
     }
 
-    // CameraX ImageCapture use case
+    // Periodically update current location for the compass
+    LaunchedEffect(permissionsState.allPermissionsGranted) {
+        if (permissionsState.allPermissionsGranted) {
+            while (true) {
+                try {
+                    fusedLocationClient.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, null)
+                        .addOnSuccessListener { location ->
+                            currentUserLocation = location
+                        }
+                } catch (e: SecurityException) {
+                    Log.e("HomeScreen", "Location permission missing", e)
+                }
+                kotlinx.coroutines.delay(5000) // Update every 5 seconds
+            }
+        }
+    }
+
     val imageCapture = remember { ImageCapture.Builder().build() }
 
     LaunchedEffect(uiState.verificationStatus) {
@@ -110,15 +136,13 @@ fun HomeScreen(viewModel: GameViewModel) {
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->
-        if (cameraPermissionState.status.isGranted) {
+        if (permissionsState.allPermissionsGranted) {
             Box(modifier = Modifier.fillMaxSize().padding(padding)) {
-                // Background Camera Preview
                 CameraPreview(
                     modifier = Modifier.fillMaxSize(),
                     imageCapture = imageCapture
                 )
 
-                // UI Overlay
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
@@ -150,19 +174,15 @@ fun HomeScreen(viewModel: GameViewModel) {
 
                     Spacer(modifier = Modifier.height(32.dp))
 
-                    // Tactical Compass UI
-                    // Mock coordinates for testing orientation:
-                    // Hunter is at ...40, Alice is at ...37 (Alice is 27m EAST of hunter)
-                    val mockHunterLat = 34.0522
-                    val mockHunterLon = -118.2440
-                    val mockTargetLat = 34.0522
-                    val mockTargetLon = -118.2437 
-
-                    val targetBearing = remember(uiState.currentTarget) {
-                        VerificationUtils.calculateBearing(
-                            mockHunterLat, mockHunterLon,
-                            mockTargetLat, mockTargetLon
-                        )
+                    val targetBearing = remember(uiState.currentTarget, currentUserLocation) {
+                        val target = uiState.currentTarget
+                        val hunter = currentUserLocation
+                        if (target != null && hunter != null && target.latitude != null && target.longitude != null) {
+                            VerificationUtils.calculateBearing(
+                                hunter.latitude, hunter.longitude,
+                                target.latitude, target.longitude
+                            )
+                        } else 0.0
                     }
                     
                     TacticalCompass(
@@ -173,23 +193,14 @@ fun HomeScreen(viewModel: GameViewModel) {
 
                     Spacer(modifier = Modifier.weight(1f))
 
-                    // Capture Button
                     Button(
                         onClick = {
-                            takePhoto(
+                            captureSnipe(
                                 context = context,
+                                fusedLocationClient = fusedLocationClient,
                                 imageCapture = imageCapture,
-                                executor = ContextCompat.getMainExecutor(context),
-                                onImageCaptured = { uri ->
-                                    viewModel.onCaptureButtonPressed(
-                                        imageUrl = uri.toString(),
-                                        hunterLat = mockHunterLat,
-                                        hunterLon = mockHunterLon,
-                                        hunterHeading = currentHeading,
-                                        capturedAt = System.currentTimeMillis()
-                                    )
-                                },
-                                onError = { Log.e("Camera", "Capture failed", it) }
+                                viewModel = viewModel,
+                                currentHeading = currentHeading
                             )
                         },
                         modifier = Modifier
@@ -210,20 +221,51 @@ fun HomeScreen(viewModel: GameViewModel) {
                 }
             }
         } else {
-            // Permission Request UI
             Column(
                 modifier = Modifier.fillMaxSize().padding(24.dp),
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text("Camera permission is required to snipe targets.")
+                Text("Camera and Location permissions are required.")
                 Spacer(modifier = Modifier.height(16.dp))
-                Button(onClick = { cameraPermissionState.launchPermissionRequest() }) {
-                    Text("Grant Permission")
+                Button(onClick = { permissionsState.launchMultiplePermissionRequest() }) {
+                    Text("Grant Permissions")
                 }
             }
         }
     }
+}
+
+@SuppressLint("MissingPermission")
+private fun captureSnipe(
+    context: Context,
+    fusedLocationClient: com.google.android.gms.location.FusedLocationProviderClient,
+    imageCapture: ImageCapture,
+    viewModel: GameViewModel,
+    currentHeading: Double
+) {
+    fusedLocationClient.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, null)
+        .addOnSuccessListener { location ->
+            if (location != null) {
+                takePhoto(
+                    context = context,
+                    imageCapture = imageCapture,
+                    executor = ContextCompat.getMainExecutor(context),
+                    onImageCaptured = { uri ->
+                        viewModel.onCaptureButtonPressed(
+                            imageUrl = uri.toString(),
+                            hunterLat = location.latitude,
+                            hunterLon = location.longitude,
+                            hunterHeading = currentHeading,
+                            capturedAt = System.currentTimeMillis()
+                        )
+                    },
+                    onError = { Log.e("Camera", "Capture failed", it) }
+                )
+            } else {
+                Log.e("HomeScreen", "Failed to get current location for snipe")
+            }
+        }
 }
 
 @Composable
@@ -234,7 +276,6 @@ fun TacticalCompass(
 ) {
     val animatedHeading by animateFloatAsState(targetValue = currentHeading.toFloat())
     
-    // Calculate if we are pointing roughly correctly for visual feedback
     val diff = abs(currentHeading - targetBearing)
     val wrappedDiff = if (diff > 180) 360 - diff else diff
     val isAligned = wrappedDiff <= 30.0
@@ -243,17 +284,14 @@ fun TacticalCompass(
         modifier = modifier,
         contentAlignment = Alignment.Center
     ) {
-        // Outer ring
         Canvas(modifier = Modifier.fillMaxSize()) {
             rotate(degrees = -animatedHeading) {
-                // North indicator
                 drawCircle(
                     color = Color.White.copy(alpha = 0.3f),
                     radius = size.minDimension / 2,
                     style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx())
                 )
                 
-                // N mark
                 drawRect(
                     color = Color.Red,
                     topLeft = androidx.compose.ui.geometry.Offset(size.width / 2 - 2.dp.toPx(), 0f),
@@ -262,10 +300,8 @@ fun TacticalCompass(
             }
         }
 
-        // Target Indicator (Fixed to target bearing)
         Canvas(modifier = Modifier.fillMaxSize()) {
             rotate(degrees = (targetBearing - currentHeading).toFloat()) {
-                // Arrow pointing to target
                 val path = androidx.compose.ui.graphics.Path().apply {
                     moveTo(size.width / 2, 20.dp.toPx())
                     lineTo(size.width / 2 - 10.dp.toPx(), 40.dp.toPx())
@@ -279,7 +315,6 @@ fun TacticalCompass(
             }
         }
 
-        // Center reticle
         Box(
             modifier = Modifier
                 .size(40.dp)
