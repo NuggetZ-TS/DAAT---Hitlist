@@ -21,11 +21,10 @@ class FakeGameRepository : GameRepository {
     private val _groups = MutableStateFlow<List<Group>>(emptyList())
     private val _snipes = MutableStateFlow<List<Snipe>>(emptyList())
     
+    // In-memory "database" for registered users to simulate persistence across logins
     private val registeredUsers = mutableMapOf<String, User>()
-    private var currentUserId: String? = null
 
     private fun setupMockEnvironment(currentUser: User) {
-        currentUserId = currentUser.id
         val names = listOf("Bob", "Charlie", "Diana")
         val baseLat = 34.0522
         val baseLon = -118.2430
@@ -47,6 +46,8 @@ class FakeGameRepository : GameRepository {
         }
         
         val allUsers = listOf(currentUser) + otherUsers
+        
+        // Randomly assign targets to everyone
         val userIds = allUsers.map { it.id }
         val assignedUsers = allUsers.map { user ->
             val targetId = userIds.filter { it != user.id }.random()
@@ -63,9 +64,10 @@ class FakeGameRepository : GameRepository {
                 members = userIds
             )
         )
+        _snipes.value = emptyList()
     }
 
-    override fun getCurrentUser(): Flow<User?> = _internalUsers.map { it.find { u -> u.id == currentUserId } }
+    override fun getCurrentUser(): Flow<User?> = _internalUsers.map { it.find { u -> u.id.startsWith("google_") || u.id == "guest_user" } }
 
     override suspend fun signInAnonymously(): Result<Unit> {
         delay(500)
@@ -81,6 +83,7 @@ class FakeGameRepository : GameRepository {
 
     override suspend fun signInWithGoogle(idToken: String): Result<SignInResult> {
         delay(500)
+        // In a real app, the idToken would be used to get the Google ID and name
         val googleId = "google_12345" 
         val email = "test@gmail.com"
         val name = "Google User"
@@ -109,7 +112,6 @@ class FakeGameRepository : GameRepository {
 
     override suspend fun signOut(): Result<Unit> {
         delay(500)
-        currentUserId = null
         _internalUsers.value = emptyList()
         return Result.success(Unit)
     }
@@ -180,9 +182,8 @@ class FakeGameRepository : GameRepository {
             targetId = targetId,
             timestamp = capturedAt,
             imageUrl = imageUrl,
-            status = SnipeStatus.PENDING,
-            pointsAwarded = points,
-            groupId = "global"
+            status = SnipeStatus.VERIFIED,
+            pointsAwarded = points
         )
         
         _snipes.update { listOf(newSnipe) + it }
@@ -203,39 +204,6 @@ class FakeGameRepository : GameRepository {
             }
         }
         return Result.success(points)
-    }
-
-    override suspend fun confirmSnipeAsTarget(snipeId: String): Result<Unit> {
-        delay(300)
-        _snipes.update { snipes ->
-            snipes.map { 
-                if (it.id == snipeId) it.copy(targetConfirmed = true, status = SnipeStatus.VERIFIED) 
-                else it 
-            }
-        }
-        return Result.success(Unit)
-    }
-
-    override suspend fun challengeSnipeAsTarget(snipeId: String): Result<Unit> {
-        delay(300)
-        _snipes.update { snipes ->
-            snipes.map { 
-                if (it.id == snipeId) it.copy(status = SnipeStatus.CHALLENGED) 
-                else it 
-            }
-        }
-        return Result.success(Unit)
-    }
-
-    override suspend fun moderateSnipe(snipeId: String, approved: Boolean): Result<Unit> {
-        delay(300)
-        _snipes.update { snipes ->
-            snipes.map { 
-                if (it.id == snipeId) it.copy(status = if (approved) SnipeStatus.VERIFIED else SnipeStatus.REJECTED) 
-                else it 
-            }
-        }
-        return Result.success(Unit)
     }
 
     override suspend fun assignDailyTargets(groupId: String): Result<Unit> {
@@ -260,26 +228,14 @@ class FakeGameRepository : GameRepository {
     }
 
     override suspend fun toggleLike(snipeId: String): Result<Unit> {
-        val userId = currentUserId ?: return Result.failure(Exception("Not logged in"))
         _snipes.update { snipes ->
             snipes.map { snipe ->
                 if (snipe.id == snipeId) {
-                    val likedBy = snipe.likedBy.toMutableList()
-                    if (likedBy.contains(userId)) {
-                        likedBy.remove(userId)
-                        snipe.copy(
-                            likedBy = likedBy,
-                            likes = likedBy.size,
-                            isLikedByMe = false
-                        )
-                    } else {
-                        likedBy.add(userId)
-                        snipe.copy(
-                            likedBy = likedBy,
-                            likes = likedBy.size,
-                            isLikedByMe = true
-                        )
-                    }
+                    val newIsLiked = !snipe.isLikedByMe
+                    snipe.copy(
+                        isLikedByMe = newIsLiked,
+                        likes = if (newIsLiked) snipe.likes + 1 else snipe.likes - 1
+                    )
                 } else {
                     snipe
                 }
