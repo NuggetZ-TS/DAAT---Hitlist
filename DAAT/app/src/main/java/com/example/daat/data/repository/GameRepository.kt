@@ -21,7 +21,7 @@ interface GameRepository {
     suspend fun updateLocation(userId: String, latitude: Double, longitude: Double): Result<Unit>
 
     /**
-     * Submits a snipe attempt. 
+     * Submits a snipe attempt.
      * Returns Result with the points awarded if successful.
      */
     suspend fun submitSnipe(
@@ -30,12 +30,12 @@ interface GameRepository {
         imageUrl: String,
         hunterLat: Double,
         hunterLon: Double,
-        hunterHeading: Double, // New parameter for orientation verification
+        hunterHeading: Double,
         capturedAt: Long
     ): Result<Int>
 
     suspend fun assignDailyTargets(groupId: String): Result<Unit>
-    
+
     fun getUserById(userId: String): Flow<User?>
 
     suspend fun toggleLike(snipeId: String): Result<Unit>
@@ -44,6 +44,14 @@ interface GameRepository {
     fun getUserGroups(userId: String): Flow<List<Group>>
     suspend fun createGroup(name: String, adminId: String): Result<String>
     suspend fun joinGroup(inviteCode: String, userId: String): Result<Unit>
+    suspend fun leaveGroup(groupId: String, userId: String): Result<Unit>
+
+    // Admin-only group management
+    fun getGroupMembers(groupId: String): Flow<List<User>>
+    suspend fun kickMember(groupId: String, targetUserId: String, adminId: String): Result<Unit>
+    suspend fun deleteGroup(groupId: String, adminId: String): Result<Unit>
+    suspend fun renameGroup(groupId: String, newName: String, adminId: String): Result<Unit>
+    suspend fun transferAdmin(groupId: String, newAdminId: String, currentAdminId: String): Result<Unit>
 }
 
 sealed class SignInResult {

@@ -8,6 +8,7 @@ import com.example.daat.data.model.User
 import com.example.daat.data.repository.GameRepository
 import com.example.daat.data.repository.SignInResult
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -29,6 +30,7 @@ data class GameUiState(
     val verificationStatus: VerificationStatus = VerificationStatus.IDLE,
     val lastPointsAwarded: Int? = null,
     val userGroups: List<Group> = emptyList(),
+    val groupMembers: List<User> = emptyList(),
     val isAuthLoading: Boolean = false,
     val registrationData: RegistrationData? = null
 )
@@ -48,6 +50,7 @@ class GameViewModel(
 ) : ViewModel() {
 
     private val _internalState = MutableStateFlow(GameUiState(isLoading = true))
+    private var groupMembersJob: Job? = null
 
     // ── Events ────────────────────────────────────────────────────
     // Emits Unit whenever a snipe succeeds — MainActivity listens to
@@ -94,11 +97,15 @@ class GameViewModel(
 
     fun getUserById(userId: String): Flow<User?> = repository.getUserById(userId)
 
+    fun clearError() {
+        _internalState.update { it.copy(errorMessage = null) }
+    }
+
     // ── Auth ──────────────────────────────────────────────────────
 
     fun onSignInAnonymously() {
         viewModelScope.launch {
-            _internalState.update { it.copy(isAuthLoading = true) }
+            _internalState.update { it.copy(isAuthLoading = true, errorMessage = null) }
             val result = repository.signInAnonymously()
             result.onSuccess {
                 onLoginSuccessEvent.tryEmit(Unit)
@@ -143,7 +150,7 @@ class GameViewModel(
     fun onCompleteRegistration(username: String, name: String) {
         val data = _internalState.value.registrationData ?: return
         viewModelScope.launch {
-            _internalState.update { it.copy(isAuthLoading = true) }
+            _internalState.update { it.copy(isAuthLoading = true, errorMessage = null) }
             val result = repository.completeRegistration(data.userId, username, name)
             result.onSuccess {
                 _internalState.update { it.copy(registrationData = null) }
@@ -176,12 +183,92 @@ class GameViewModel(
 
     fun onJoinGroup(code: String) {
         val userId = uiState.value.currentUser?.id ?: return
-        viewModelScope.launch { repository.joinGroup(code, userId) }
+        _internalState.update { it.copy(isLoading = true, errorMessage = null) }
+        viewModelScope.launch {
+            repository.joinGroup(code, userId)
+                .onFailure { error ->
+                    _internalState.update { it.copy(errorMessage = "Join failed: ${error.message}") }
+                }
+            _internalState.update { it.copy(isLoading = false) }
+        }
     }
 
     fun onCreateGroup(name: String) {
         val userId = uiState.value.currentUser?.id ?: return
-        viewModelScope.launch { repository.createGroup(name, userId) }
+        _internalState.update { it.copy(isLoading = true, errorMessage = null) }
+        viewModelScope.launch {
+            repository.createGroup(name, userId)
+                .onFailure { error ->
+                    _internalState.update { it.copy(errorMessage = "Create failed: ${error.message}") }
+                }
+            _internalState.update { it.copy(isLoading = false) }
+        }
+    }
+
+    fun onLeaveGroup(groupId: String) {
+        val userId = uiState.value.currentUser?.id ?: return
+        _internalState.update { it.copy(isLoading = true, errorMessage = null) }
+        viewModelScope.launch {
+            repository.leaveGroup(groupId, userId)
+                .onFailure { error ->
+                    _internalState.update { it.copy(errorMessage = "Leave failed: ${error.message}") }
+                }
+            _internalState.update { it.copy(isLoading = false) }
+        }
+    }
+
+    fun loadGroupMembers(groupId: String) {
+        groupMembersJob?.cancel()
+        groupMembersJob = viewModelScope.launch {
+            repository.getGroupMembers(groupId).collect { members ->
+                _internalState.update { it.copy(groupMembers = members) }
+            }
+        }
+    }
+
+    fun clearGroupMembers() {
+        groupMembersJob?.cancel()
+        _internalState.update { it.copy(groupMembers = emptyList()) }
+    }
+
+    fun onRenameGroup(groupId: String, newName: String) {
+        val adminId = uiState.value.currentUser?.id ?: return
+        viewModelScope.launch {
+            repository.renameGroup(groupId, newName, adminId)
+                .onFailure { error ->
+                    _internalState.update { it.copy(errorMessage = "Rename failed: ${error.message}") }
+                }
+        }
+    }
+
+    fun onDeleteGroup(groupId: String) {
+        val adminId = uiState.value.currentUser?.id ?: return
+        viewModelScope.launch {
+            repository.deleteGroup(groupId, adminId)
+                .onFailure { error ->
+                    _internalState.update { it.copy(errorMessage = "Delete failed: ${error.message}") }
+                }
+        }
+    }
+
+    fun onKickMember(groupId: String, targetUserId: String) {
+        val adminId = uiState.value.currentUser?.id ?: return
+        viewModelScope.launch {
+            repository.kickMember(groupId, targetUserId, adminId)
+                .onFailure { error ->
+                    _internalState.update { it.copy(errorMessage = "Kick failed: ${error.message}") }
+                }
+        }
+    }
+
+    fun onTransferAdmin(groupId: String, newAdminId: String) {
+        val adminId = uiState.value.currentUser?.id ?: return
+        viewModelScope.launch {
+            repository.transferAdmin(groupId, newAdminId, adminId)
+                .onFailure { error ->
+                    _internalState.update { it.copy(errorMessage = "Transfer failed: ${error.message}") }
+                }
+        }
     }
 
     fun onCaptureButtonPressed(
@@ -194,7 +281,7 @@ class GameViewModel(
         val hunter = uiState.value.currentUser ?: return
         val targetId = hunter.currentTargetId ?: return
 
-        _internalState.update { it.copy(verificationStatus = VerificationStatus.VERIFYING) }
+        _internalState.update { it.copy(verificationStatus = VerificationStatus.VERIFYING, errorMessage = null) }
 
         viewModelScope.launch {
             val result = repository.submitSnipe(
@@ -223,7 +310,7 @@ class GameViewModel(
                     "WRONG_ORIENTATION" -> VerificationStatus.FAILED_ORIENTATION
                     else               -> VerificationStatus.IDLE
                 }
-                _internalState.update { it.copy(verificationStatus = status) }
+                _internalState.update { it.copy(verificationStatus = status, errorMessage = error.message) }
             }
         }
     }
