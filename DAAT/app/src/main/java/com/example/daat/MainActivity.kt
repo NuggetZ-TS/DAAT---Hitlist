@@ -99,7 +99,8 @@ class MainActivity : ComponentActivity() {
                 } else {
                     DAATApp(
                         viewModel = viewModel,
-                        onRequestLocation = { startLocationFlow() }
+                        onRequestLocation = { startLocationFlow() },
+                        onSignOut = { guestMode = false }
                     )
                 }
             }
@@ -120,7 +121,8 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun DAATApp(
     viewModel: GameViewModel,
-    onRequestLocation: () -> Unit = {}
+    onRequestLocation: () -> Unit = {},
+    onSignOut: () -> Unit = {}
 ) {
     var currentDestination by rememberSaveable { mutableStateOf(AppDestinations.HOME) }
 
@@ -142,7 +144,10 @@ fun DAATApp(
                     AppDestinations.HOME        -> HomeScreen(viewModel)
                     AppDestinations.FEED        -> FeedScreen(viewModel)
                     AppDestinations.LEADERBOARD -> LeaderboardScreen(viewModel)
-                    AppDestinations.PROFILE     -> ProfileScreen(viewModel)
+                    AppDestinations.PROFILE     -> ProfileScreen(
+                        viewModel = viewModel,
+                        onSignOut = onSignOut
+                    )
                 }
             }
         }

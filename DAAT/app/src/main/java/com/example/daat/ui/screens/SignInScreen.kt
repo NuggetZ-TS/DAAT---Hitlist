@@ -102,7 +102,12 @@ fun SignInScreen(
             Text("Connecting...", style = MaterialTheme.typography.labelMedium)
         } else {
             Button(
-                onClick = { launcher.launch(googleSignInClient.signInIntent) },
+                onClick = { 
+                    // Force account picker by signing out the client first
+                    googleSignInClient.signOut().addOnCompleteListener {
+                        launcher.launch(googleSignInClient.signInIntent)
+                    }
+                },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(56.dp)

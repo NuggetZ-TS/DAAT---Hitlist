@@ -82,7 +82,11 @@ fun SnipeCard(snipe: Snipe, viewModel: GameViewModel) {
                         fontSize = 16.sp
                     )
                     Text(
-                        text = SimpleDateFormat("MMM dd, HH:mm", Locale.getDefault()).format(Date(snipe.timestamp)),
+                        text = try {
+                            SimpleDateFormat("MMM dd, HH:mm", Locale.getDefault()).format(Date(snipe.timestamp))
+                        } catch (e: Exception) {
+                            "Unknown date"
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -137,11 +141,12 @@ fun SnipeCard(snipe: Snipe, viewModel: GameViewModel) {
                     color = if (snipe.status.name == "VERIFIED") Color(0xFFE8F5E9) else Color(0xFFF5F5F5),
                     shape = RoundedCornerShape(8.dp)
                 ) {
+                    val statusName = try { snipe.status.name } catch (e: Exception) { "UNKNOWN" }
                     Text(
-                        text = snipe.status.name,
+                        text = statusName,
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                         style = MaterialTheme.typography.labelMedium,
-                        color = if (snipe.status.name == "VERIFIED") Color(0xFF2E7D32) else Color.Gray
+                        color = if (statusName == "VERIFIED") Color(0xFF2E7D32) else Color.Gray
                     )
                 }
             }

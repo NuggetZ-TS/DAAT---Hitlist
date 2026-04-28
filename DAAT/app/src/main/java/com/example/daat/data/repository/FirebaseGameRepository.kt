@@ -13,9 +13,12 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.storage.FirebaseStorage
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.tasks.await
 import java.util.UUID
 
@@ -24,25 +27,45 @@ class FirebaseGameRepository : GameRepository {
     private val db = FirebaseFirestore.getInstance()
     private val storage = FirebaseStorage.getInstance()
 
+    @OptIn(ExperimentalCoroutinesApi::class)
     override fun getCurrentUser(): Flow<User?> = callbackFlow {
-        val userId = auth.currentUser?.uid
-        if (userId == null) {
+        val authListener = FirebaseAuth.AuthStateListener { firebaseAuth ->
+            val userId = firebaseAuth.currentUser?.uid
+            if (userId == null) {
+                trySend(null)
+            }
+        }
+        auth.addAuthStateListener(authListener)
+
+        val initialUserId = auth.currentUser?.uid
+        if (initialUserId == null) {
             trySend(null)
-            close()
-            return@callbackFlow
         }
 
-        val listener = db.collection("users").document(userId)
-            .addSnapshotListener { snapshot, _ ->
-                if (snapshot != null && snapshot.exists()) {
-                    val user = snapshot.toObject(User::class.java)
-                    trySend(user)
-                } else {
-                    // We don't automatically create a user here anymore to allow for registration flow
-                    trySend(null)
-                }
+        // We use a separate listener for user data updates
+        var userDataListener: com.google.firebase.firestore.ListenerRegistration? = null
+        
+        val authStateListenerForData = FirebaseAuth.AuthStateListener { firebaseAuth ->
+            userDataListener?.remove()
+            val userId = firebaseAuth.currentUser?.uid
+            if (userId != null) {
+                userDataListener = db.collection("users").document(userId)
+                    .addSnapshotListener { snapshot, _ ->
+                        if (snapshot != null && snapshot.exists()) {
+                            trySend(snapshot.toObject(User::class.java))
+                        } else {
+                            trySend(null)
+                        }
+                    }
             }
-        awaitClose { listener.remove() }
+        }
+        auth.addAuthStateListener(authStateListenerForData)
+
+        awaitClose {
+            auth.removeAuthStateListener(authListener)
+            auth.removeAuthStateListener(authStateListenerForData)
+            userDataListener?.remove()
+        }
     }
 
     override suspend fun signInAnonymously(): Result<Unit> {
@@ -284,7 +307,8 @@ class FirebaseGameRepository : GameRepository {
             
             val userRef = db.collection("users").document(adminId)
             db.runTransaction { transaction ->
-                val user = transaction.get(userRef).toObject(User::class.java)
+                val userSnapshot = transaction.get(userRef)
+                val user = userSnapshot.toObject(User::class.java)
                 val newGroupIds = (user?.groupIds ?: emptyList()) + docRef.id
                 transaction.update(userRef, "groupIds", newGroupIds)
             }.await()
@@ -297,8 +321,9 @@ class FirebaseGameRepository : GameRepository {
 
     override suspend fun joinGroup(inviteCode: String, userId: String): Result<Unit> {
         return try {
+            val normalizedCode = inviteCode.uppercase().trim()
             val groupSnapshot = db.collection("groups")
-                .whereEqualTo("inviteCode", inviteCode)
+                .whereEqualTo("inviteCode", normalizedCode)
                 .limit(1)
                 .get()
                 .await()
@@ -307,22 +332,157 @@ class FirebaseGameRepository : GameRepository {
                 ?: return Result.failure(Exception("Invalid invite code"))
             
             val groupId = groupDoc.id
-            @Suppress("UNCHECKED_CAST")
-            val members = groupDoc.get("members") as? List<String> ?: emptyList()
-            
-            if (members.contains(userId)) {
-                return Result.failure(Exception("Already a member"))
-            }
+            val groupRef = groupDoc.reference
+            val userRef = db.collection("users").document(userId)
 
             db.runTransaction { transaction ->
-                transaction.update(groupDoc.reference, "members", members + userId)
+                // READS FIRST
+                val latestGroup = transaction.get(groupRef).toObject(Group::class.java) 
+                    ?: throw Exception("Group no longer exists")
+                val latestUser = transaction.get(userRef).toObject(User::class.java)
+                    ?: throw Exception("User not found")
+
+                if (latestGroup.members.contains(userId)) {
+                    // Already a member, do nothing but succeed
+                    return@runTransaction
+                }
+
+                // WRITES SECOND
+                val newMembers = latestGroup.members + userId
+                val newGroupIds = (latestUser.groupIds + groupId).distinct()
                 
-                val userRef = db.collection("users").document(userId)
-                val user = transaction.get(userRef).toObject(User::class.java)
-                val newGroupIds = (user?.groupIds ?: emptyList()) + groupId
+                transaction.update(groupRef, "members", newMembers)
                 transaction.update(userRef, "groupIds", newGroupIds)
             }.await()
 
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun leaveGroup(groupId: String, userId: String): Result<Unit> {
+        return try {
+            if (groupId == "global") return Result.failure(Exception("Cannot leave global group"))
+
+            val groupRef = db.collection("groups").document(groupId)
+            val userRef = db.collection("users").document(userId)
+
+            db.runTransaction { transaction ->
+                val group = transaction.get(groupRef).toObject(Group::class.java) ?: throw Exception("Group not found")
+                val user = transaction.get(userRef).toObject(User::class.java) ?: throw Exception("User not found")
+
+                val newMembers = group.members - userId
+                val newGroupIds = user.groupIds - groupId
+
+                // If user was admin, transfer admin to someone else or delete group if empty
+                if (group.adminId == userId) {
+                    if (newMembers.isNotEmpty()) {
+                        transaction.update(groupRef, "adminId", newMembers.first())
+                    } else {
+                        transaction.delete(groupRef)
+                    }
+                }
+
+                transaction.update(groupRef, "members", newMembers)
+                transaction.update(userRef, "groupIds", newGroupIds)
+            }.await()
+
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override fun getGroupMembers(groupId: String): Flow<List<User>> = callbackFlow {
+        val groupListener = db.collection("groups").document(groupId)
+            .addSnapshotListener { groupSnapshot, _ ->
+                val memberIds = groupSnapshot?.get("members") as? List<String> ?: emptyList()
+                if (memberIds.isEmpty()) {
+                    trySend(emptyList())
+                    return@addSnapshotListener
+                }
+                
+                // Fetch all members' public profiles
+                db.collection("users")
+                    .whereIn("id", memberIds)
+                    .get()
+                    .addOnSuccessListener { usersSnapshot ->
+                        val users = usersSnapshot.documents.mapNotNull { it.toObject(User::class.java)?.toPublicProfile() }
+                        trySend(users)
+                    }
+            }
+        awaitClose { groupListener.remove() }
+    }
+
+    override suspend fun kickMember(groupId: String, targetUserId: String, adminId: String): Result<Unit> {
+        return try {
+            val groupRef = db.collection("groups").document(groupId)
+            val targetUserRef = db.collection("users").document(targetUserId)
+
+            db.runTransaction { transaction ->
+                val group = transaction.get(groupRef).toObject(Group::class.java) ?: throw Exception("Group not found")
+                if (group.adminId != adminId) throw Exception("Only admin can kick members")
+                if (targetUserId == adminId) throw Exception("Admin cannot kick themselves")
+
+                val targetUser = transaction.get(targetUserRef).toObject(User::class.java) ?: throw Exception("User not found")
+
+                transaction.update(groupRef, "members", group.members - targetUserId)
+                transaction.update(targetUserRef, "groupIds", targetUser.groupIds - groupId)
+            }.await()
+
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun deleteGroup(groupId: String, adminId: String): Result<Unit> {
+        return try {
+            if (groupId == "global") return Result.failure(Exception("Cannot delete global group"))
+            
+            val groupRef = db.collection("groups").document(groupId)
+            val group = groupRef.get().await().toObject(Group::class.java) ?: throw Exception("Group not found")
+            if (group.adminId != adminId) throw Exception("Only admin can delete group")
+
+            val memberIds = group.members
+            
+            // Remove group from all members' lists
+            db.runBatch { batch ->
+                memberIds.forEach { memberId ->
+                    val userRef = db.collection("users").document(memberId)
+                    batch.update(userRef, "groupIds", com.google.firebase.firestore.FieldValue.arrayRemove(groupId))
+                }
+                batch.delete(groupRef)
+            }.await()
+
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun renameGroup(groupId: String, newName: String, adminId: String): Result<Unit> {
+        return try {
+            val groupRef = db.collection("groups").document(groupId)
+            val group = groupRef.get().await().toObject(Group::class.java) ?: throw Exception("Group not found")
+            if (group.adminId != adminId) throw Exception("Only admin can rename group")
+
+            groupRef.update("name", newName).await()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun transferAdmin(groupId: String, newAdminId: String, currentAdminId: String): Result<Unit> {
+        return try {
+            val groupRef = db.collection("groups").document(groupId)
+            val group = groupRef.get().await().toObject(Group::class.java) ?: throw Exception("Group not found")
+            if (group.adminId != currentAdminId) throw Exception("Only current admin can transfer ownership")
+            if (!group.members.contains(newAdminId)) throw Exception("New admin must be a member of the group")
+
+            groupRef.update("adminId", newAdminId).await()
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)
