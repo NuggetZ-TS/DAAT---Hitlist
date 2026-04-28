@@ -40,6 +40,11 @@ interface GameRepository {
 
     suspend fun toggleLike(snipeId: String): Result<Unit>
 
+    // Verification & Moderation
+    suspend fun confirmSnipeAsTarget(snipeId: String): Result<Unit>
+    suspend fun challengeSnipeAsTarget(snipeId: String): Result<Unit>
+    suspend fun moderateSnipe(snipeId: String, approved: Boolean): Result<Unit>
+
     // Groups
     fun getUserGroups(userId: String): Flow<List<Group>>
     suspend fun createGroup(name: String, adminId: String): Result<String>
