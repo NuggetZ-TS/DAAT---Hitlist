@@ -9,6 +9,7 @@ import com.example.daat.logic.ScoringManager
 import com.example.daat.logic.VerificationUtils
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.GoogleAuthProvider
+import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.SetOptions
@@ -38,7 +39,6 @@ class FirebaseGameRepository : GameRepository {
                     val user = snapshot.toObject(User::class.java)
                     trySend(user)
                 } else {
-                    // We don't automatically create a user here anymore to allow for registration flow
                     trySend(null)
                 }
             }
@@ -50,7 +50,6 @@ class FirebaseGameRepository : GameRepository {
             val result = auth.signInAnonymously().await()
             val userId = result.user?.uid ?: throw Exception("Auth failed")
             
-            // For anonymous users, we can create a default profile immediately
             val newUser = User(
                 id = userId,
                 name = "Guest",
@@ -149,7 +148,11 @@ class FirebaseGameRepository : GameRepository {
             .orderBy("timestamp", Query.Direction.DESCENDING)
             .limit(50)
             .addSnapshotListener { snapshot, _ ->
-                val snipes = snapshot?.documents?.mapNotNull { it.toObject(Snipe::class.java) } ?: emptyList()
+                val currentUserId = auth.currentUser?.uid
+                val snipes = snapshot?.documents?.mapNotNull { doc ->
+                    val snipe = doc.toObject(Snipe::class.java)
+                    snipe?.copy(isLikedByMe = currentUserId != null && snipe.likedBy.contains(currentUserId))
+                } ?: emptyList()
                 trySend(snipes)
             }
         awaitClose { listener.remove() }
@@ -213,14 +216,14 @@ class FirebaseGameRepository : GameRepository {
                 id = snipeId,
                 hunterId = hunterId,
                 targetId = targetId,
+                groupId = "global",
                 timestamp = capturedAt,
                 imageUrl = downloadUrl,
-                status = SnipeStatus.VERIFIED,
+                status = SnipeStatus.PENDING,
                 pointsAwarded = points
             )
             db.collection("snipes").document(snipeId).set(newSnipe).await()
 
-            // Update Hunter Stats, Rotation, and current Location in DB
             db.collection("users").document(hunterId).update(mapOf(
                 "totalScore" to (hunter.totalScore + points),
                 "currentStreak" to (hunter.currentStreak + 1),
@@ -250,9 +253,57 @@ class FirebaseGameRepository : GameRepository {
 
     override suspend fun toggleLike(snipeId: String): Result<Unit> {
         return try {
+            val userId = auth.currentUser?.uid ?: throw Exception("Not logged in")
+            val snipeRef = db.collection("snipes").document(snipeId)
+            
+            db.runTransaction { transaction ->
+                val snipe = transaction.get(snipeRef).toObject(Snipe::class.java) ?: return@runTransaction
+                val likedBy = snipe.likedBy.toMutableList()
+                
+                if (likedBy.contains(userId)) {
+                    likedBy.remove(userId)
+                    transaction.update(snipeRef, "likedBy", likedBy)
+                    transaction.update(snipeRef, "likes", FieldValue.increment(-1))
+                } else {
+                    likedBy.add(userId)
+                    transaction.update(snipeRef, "likedBy", likedBy)
+                    transaction.update(snipeRef, "likes", FieldValue.increment(1))
+                }
+            }.await()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun confirmSnipeAsTarget(snipeId: String): Result<Unit> {
+        return try {
             db.collection("snipes").document(snipeId)
-                .update("likes", com.google.firebase.firestore.FieldValue.increment(1))
-                .await()
+                .update(mapOf(
+                    "targetConfirmed" to true,
+                    "status" to SnipeStatus.VERIFIED.name
+                )).await()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun challengeSnipeAsTarget(snipeId: String): Result<Unit> {
+        return try {
+            db.collection("snipes").document(snipeId)
+                .update("status", SnipeStatus.CHALLENGED.name).await()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun moderateSnipe(snipeId: String, approved: Boolean): Result<Unit> {
+        return try {
+            val status = if (approved) SnipeStatus.VERIFIED else SnipeStatus.REJECTED
+            db.collection("snipes").document(snipeId)
+                .update("status", status.name).await()
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)

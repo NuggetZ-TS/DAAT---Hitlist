@@ -50,12 +50,7 @@ class GameViewModel(
     private val _internalState = MutableStateFlow(GameUiState(isLoading = true))
 
     // ── Events ────────────────────────────────────────────────────
-    // Emits Unit whenever a snipe succeeds — MainActivity listens to
-    // this to trigger a fresh GPS fetch and save to Firebase.
     val onSnipeSuccessEvent = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
-
-    // Emits Unit when a user fully logs in (Google or anonymous) so
-    // MainActivity can trigger the first location save.
     val onLoginSuccessEvent = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
 
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -116,12 +111,9 @@ class GameViewModel(
             result.onSuccess { signInResult ->
                 when (signInResult) {
                     is SignInResult.Success -> {
-                        // Returning user — Firebase will update getCurrentUser() flow,
-                        // fire login event so MainActivity saves location
                         onLoginSuccessEvent.tryEmit(Unit)
                     }
                     is SignInResult.NeedsRegistration -> {
-                        // New user — show registration dialog
                         _internalState.update {
                             it.copy(
                                 registrationData = RegistrationData(
@@ -147,7 +139,6 @@ class GameViewModel(
             val result = repository.completeRegistration(data.userId, username, name)
             result.onSuccess {
                 _internalState.update { it.copy(registrationData = null) }
-                // New user just finished registration — save their location too
                 onLoginSuccessEvent.tryEmit(Unit)
             }.onFailure { error ->
                 _internalState.update { it.copy(errorMessage = error.message) }
@@ -184,6 +175,20 @@ class GameViewModel(
         viewModelScope.launch { repository.createGroup(name, userId) }
     }
 
+    // ── Verification & Moderation ─────────────────────────────────
+
+    fun onConfirmSnipe(snipeId: String) {
+        viewModelScope.launch { repository.confirmSnipeAsTarget(snipeId) }
+    }
+
+    fun onChallengeSnipe(snipeId: String) {
+        viewModelScope.launch { repository.challengeSnipeAsTarget(snipeId) }
+    }
+
+    fun onModerateSnipe(snipeId: String, approved: Boolean) {
+        viewModelScope.launch { repository.moderateSnipe(snipeId, approved) }
+    }
+
     fun onCaptureButtonPressed(
         imageUrl: String,
         hunterLat: Double,
@@ -214,7 +219,6 @@ class GameViewModel(
                         lastPointsAwarded = points
                     )
                 }
-                // Fire event so MainActivity saves fresh location after a successful snipe
                 onSnipeSuccessEvent.tryEmit(Unit)
             }.onFailure { error ->
                 val status = when (error.message) {
