@@ -12,7 +12,12 @@ data class User(
     val latitude: Double? = null,
     val longitude: Double? = null,
     val lastLocationUpdate: Long? = null,
-    val groupIds: List<String> = emptyList() // List of groups the user has joined
+    val groupIds: List<String> = emptyList(),
+    /**
+     * The groupId the player last selected on the Home screen.
+     * Persisted so it survives app restarts.
+     */
+    val activeGroupId: String? = null
 ) {
     fun toPublicProfile() = copy(
         latitude = null,

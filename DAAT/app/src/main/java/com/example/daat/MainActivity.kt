@@ -19,6 +19,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import com.example.daat.data.repository.FirebaseAssignmentRepository
 import com.example.daat.data.repository.FirebaseGameRepository
 import com.example.daat.ui.screens.FeedScreen
 import com.example.daat.ui.screens.HomeScreen
@@ -30,15 +31,20 @@ import com.example.daat.ui.viewmodel.GameViewModel
 
 class MainActivity : ComponentActivity() {
 
-    private lateinit var locationManager: LocationManager
+    lateinit var locationManager: LocationManager
+        private set
 
     private val locationPermissionRequest = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         val granted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true
                 || permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
-        if (granted) fetchLocation()
-        else Toast.makeText(this, "Location permission denied", Toast.LENGTH_SHORT).show()
+        if (granted) {
+            fetchLocation()
+            locationManager.startPassiveLocationUpdates()
+        } else {
+            Toast.makeText(this, "Location permission denied", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun fetchLocation() {
@@ -63,42 +69,32 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         locationManager = LocationManager(this)
-
         enableEdgeToEdge()
+
         setContent {
             DAATTheme {
-                val repository = remember { FirebaseGameRepository() }
-                val viewModel = remember { GameViewModel(repository) }
+                val gameRepository = remember { FirebaseGameRepository() }
+                val assignmentRepository = remember { FirebaseAssignmentRepository() }
+                val viewModel = remember { GameViewModel(gameRepository, assignmentRepository) }
                 val uiState by viewModel.uiState.collectAsState()
 
-                // Guest mode — local flag only, no Firebase involved
                 var guestMode by rememberSaveable { mutableStateOf(false) }
                 val isLoggedIn = uiState.currentUser != null || guestMode
 
-                // ── Location triggers ─────────────────────────────
-                // 1. After Google login or registration completes
                 LaunchedEffect(viewModel) {
-                    viewModel.onLoginSuccessEvent.collect {
-                        startLocationFlow()
-                    }
+                    viewModel.onLoginSuccessEvent.collect { startLocationFlow() }
                 }
-                // 2. After a successful snipe
                 LaunchedEffect(viewModel) {
-                    viewModel.onSnipeSuccessEvent.collect {
-                        startLocationFlow()
-                    }
+                    viewModel.onSnipeSuccessEvent.collect { startLocationFlow() }
                 }
 
                 if (!isLoggedIn) {
-                    SignInScreen(
-                        viewModel = viewModel,
-                        onGuestBypass = { guestMode = true }
-                    )
+                    SignInScreen(viewModel = viewModel, onGuestBypass = { guestMode = true })
                 } else {
                     DAATApp(
                         viewModel = viewModel,
+                        locationManager = locationManager,
                         onRequestLocation = { startLocationFlow() },
                         onSignOut = { guestMode = false }
                     )
@@ -109,18 +105,25 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (::locationManager.isInitialized) locationManager.startOrientationUpdates()
+        if (::locationManager.isInitialized) {
+            locationManager.startOrientationUpdates()
+            locationManager.startPassiveLocationUpdates()
+        }
     }
 
     override fun onPause() {
         super.onPause()
-        if (::locationManager.isInitialized) locationManager.stopOrientationUpdates()
+        if (::locationManager.isInitialized) {
+            locationManager.stopOrientationUpdates()
+            locationManager.stopPassiveLocationUpdates()
+        }
     }
 }
 
 @Composable
 fun DAATApp(
     viewModel: GameViewModel,
+    locationManager: LocationManager,
     onRequestLocation: () -> Unit = {},
     onSignOut: () -> Unit = {}
 ) {
@@ -141,7 +144,10 @@ fun DAATApp(
         Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
             Box(modifier = Modifier.padding(innerPadding)) {
                 when (currentDestination) {
-                    AppDestinations.HOME        -> HomeScreen(viewModel)
+                    AppDestinations.HOME -> HomeScreen(
+                        viewModel = viewModel,
+                        locationManager = locationManager
+                    )
                     AppDestinations.FEED        -> FeedScreen(viewModel)
                     AppDestinations.LEADERBOARD -> LeaderboardScreen(viewModel)
                     AppDestinations.PROFILE     -> ProfileScreen(

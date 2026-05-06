@@ -4,40 +4,56 @@ import kotlin.math.*
 
 object VerificationUtils {
 
-    private const val MAX_DISTANCE_METERS = 50.0
-    private const val MAX_BEARING_OFFSET_DEGREES = 20.0  // ±20° tolerance
-    private const val MAX_PHOTO_AGE_MS = 5 * 60 * 1000 // 5 minutes
+    /**
+     * Maximum allowed distance between hunter and target in metres.
+     * 50 m is roughly half a city block — tight enough to require proximity,
+     * loose enough for GPS drift (~5–15 m on a good fix).
+     */
+    const val MAX_DISTANCE_METERS = 50.0
 
     /**
-     * Returns true if the photo was captured within the last 5 minutes.
+     * ±30° bearing tolerance.
+     *
+     * Why 30° and not tighter:
+     *  - Phone compass can drift ±10° from magnetic interference / cases.
+     *  - GPS coordinates have ~5–15 m error on each device, which at 10 m
+     *    separation introduces ~8° of bearing error on its own.
+     *  - Camera field of view is typically ~70° wide, so ±30° still requires
+     *    you to be roughly pointing the camera toward the target.
+     *
+     * This is stricter than the previous 45° but realistic for real hardware.
      */
-    fun isPhotoFresh(capturedAt: Long): Boolean {
-        return (System.currentTimeMillis() - capturedAt) < MAX_PHOTO_AGE_MS
-    }
+    const val MAX_BEARING_OFFSET_DEGREES = 30.0
+
+    /** Photo must have been taken within the last 30 seconds. */
+    private const val MAX_PHOTO_AGE_MS = 30_000L
+
+    fun isPhotoFresh(capturedAt: Long): Boolean =
+        (System.currentTimeMillis() - capturedAt) < MAX_PHOTO_AGE_MS
 
     // ── Distance ─────────────────────────────────────────────────
 
     /**
-     * Haversine formula — returns distance in metres between two GPS coordinates.
+     * Haversine formula — returns distance in metres.
      */
     fun calculateDistance(
         lat1: Double, lon1: Double,
         lat2: Double, lon2: Double
     ): Double {
-        val earthRadius = 6_371_000.0 // metres
+        val r = 6_371_000.0
         val dLat = Math.toRadians(lat2 - lat1)
         val dLon = Math.toRadians(lon2 - lon1)
         val a = sin(dLat / 2).pow(2) +
                 cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) *
                 sin(dLon / 2).pow(2)
-        val c = 2 * atan2(sqrt(a), sqrt(1 - a))
-        return earthRadius * c
+        return r * 2 * atan2(sqrt(a), sqrt(1 - a))
     }
 
     // ── Bearing ──────────────────────────────────────────────────
 
     /**
-     * Returns the bearing (degrees, 0 = North, clockwise) from point 1 → point 2.
+     * Returns the forward bearing in degrees (0 = North, clockwise)
+     * from point 1 to point 2.
      */
     fun calculateBearing(
         lat1: Double, lon1: Double,
@@ -52,57 +68,81 @@ object VerificationUtils {
     }
 
     /**
-     * Returns true if [hunterHeading] (phone compass, degrees) is within
-     * ±[MAX_BEARING_OFFSET_DEGREES] of the bearing towards the target.
+     * Angular difference between two bearings, always in [0, 180].
      */
-    fun isPointingAtTarget(hunterHeading: Double, targetBearing: Double): Boolean {
-        val diff = abs(((hunterHeading - targetBearing + 540) % 360) - 180)
-        return diff <= MAX_BEARING_OFFSET_DEGREES
-    }
+    fun bearingDiff(a: Double, b: Double): Double =
+        abs(((a - b + 540) % 360) - 180)
 
-    // ── Full snipe verification ───────────────────────────────────
+    /**
+     * True if [hunterHeading] is within ±[MAX_BEARING_OFFSET_DEGREES]
+     * of [targetBearing].
+     */
+    fun isPointingAtTarget(hunterHeading: Double, targetBearing: Double): Boolean =
+        bearingDiff(hunterHeading, targetBearing) <= MAX_BEARING_OFFSET_DEGREES
+
+    // ── Full verification ─────────────────────────────────────────
 
     data class VerificationResult(
         val success: Boolean,
+        val errorCode: String = "",
         val reason: String,
         val distanceMeters: Double = 0.0,
         val bearingDiff: Double = 0.0
     )
 
     /**
-     * Runs all checks and returns a [VerificationResult].
+     * Runs every check in order and returns a detailed result.
      *
-     * @param hunterLat      shooter's latitude
-     * @param hunterLon      shooter's longitude
-     * @param hunterHeading  shooter's compass heading (degrees)
-     * @param targetLat      target's latitude (fetched from Firebase)
-     * @param targetLon      target's longitude (fetched from Firebase)
+     * Call this from the UI layer to get human-readable failure reasons.
+     * [FirebaseGameRepository.submitSnipe] re-runs the same logic server-side
+     * using the freshest Firestore values as a second layer of verification.
      */
     fun verifySnipe(
         hunterLat: Double,
         hunterLon: Double,
         hunterHeading: Double,
-        targetLat: Double,
-        targetLon: Double
+        targetLat: Double?,
+        targetLon: Double?,
+        capturedAt: Long
     ): VerificationResult {
 
-        // 1. Distance check
+        // 0. Photo freshness
+        if (!isPhotoFresh(capturedAt)) {
+            return VerificationResult(
+                success = false,
+                errorCode = "TOO_OLD",
+                reason = "Photo is too old — must be taken within 30 seconds."
+            )
+        }
+
+        // 1. Target location availability
+        if (targetLat == null || targetLon == null || (targetLat == 0.0 && targetLon == 0.0)) {
+            return VerificationResult(
+                success = false,
+                errorCode = "TARGET_LOCATION_UNAVAILABLE",
+                reason = "Target's location isn't available yet. Ask them to open the app."
+            )
+        }
+
+        // 2. Distance
         val distance = calculateDistance(hunterLat, hunterLon, targetLat, targetLon)
         if (distance > MAX_DISTANCE_METERS) {
             return VerificationResult(
                 success = false,
-                reason = "Too far! You are ${distance.toInt()}m away (max ${MAX_DISTANCE_METERS.toInt()}m).",
+                errorCode = "TOO_FAR",
+                reason = "Too far — you are ${distance.toInt()}m away (max ${MAX_DISTANCE_METERS.toInt()}m).",
                 distanceMeters = distance
             )
         }
 
-        // 2. Orientation check
+        // 3. Bearing / orientation
         val bearing = calculateBearing(hunterLat, hunterLon, targetLat, targetLon)
-        val diff = abs(((hunterHeading - bearing + 540) % 360) - 180)
-        if (!isPointingAtTarget(hunterHeading, bearing)) {
+        val diff = bearingDiff(hunterHeading, bearing)
+        if (diff > MAX_BEARING_OFFSET_DEGREES) {
             return VerificationResult(
                 success = false,
-                reason = "Phone not pointing at target. Off by ${diff.toInt()}° (max ${MAX_BEARING_OFFSET_DEGREES.toInt()}°).",
+                errorCode = "WRONG_ORIENTATION",
+                reason = "Camera not aimed at target — off by ${diff.toInt()}° (max ${MAX_BEARING_OFFSET_DEGREES.toInt()}°).",
                 distanceMeters = distance,
                 bearingDiff = diff
             )
@@ -110,7 +150,7 @@ object VerificationUtils {
 
         return VerificationResult(
             success = true,
-            reason = "Snipe verified! 📸",
+            reason = "Verified ✓",
             distanceMeters = distance,
             bearingDiff = diff
         )

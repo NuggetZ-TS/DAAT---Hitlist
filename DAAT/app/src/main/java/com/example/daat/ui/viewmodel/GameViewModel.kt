@@ -3,8 +3,11 @@ package com.example.daat.ui.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.daat.data.model.Group
+import com.example.daat.data.model.GroupAssignment
 import com.example.daat.data.model.Snipe
+import com.example.daat.data.model.SnipeChallenge
 import com.example.daat.data.model.User
+import com.example.daat.data.repository.AssignmentRepository
 import com.example.daat.data.repository.GameRepository
 import com.example.daat.data.repository.SignInResult
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -32,7 +35,22 @@ data class GameUiState(
     val userGroups: List<Group> = emptyList(),
     val groupMembers: List<User> = emptyList(),
     val isAuthLoading: Boolean = false,
-    val registrationData: RegistrationData? = null
+    val registrationData: RegistrationData? = null,
+
+    // ── Group game ────────────────────────────────────────────────
+    val selectedGroup: Group? = null,
+    val activeAssignment: GroupAssignment? = null,
+    /** Public profile of today's target — used for name/username display. */
+    val activeTarget: User? = null,
+    /**
+     * Raw (full) user doc of today's target — includes lat/lng.
+     * Used ONLY for distance/bearing calculation. Never shown directly in UI.
+     */
+    val activeTargetRaw: User? = null,
+
+    // ── Challenges ────────────────────────────────────────────────
+    val pendingChallenges: List<SnipeChallenge> = emptyList(),
+    val selectedChallenge: SnipeChallenge? = null,
 )
 
 data class RegistrationData(
@@ -42,23 +60,24 @@ data class RegistrationData(
 )
 
 enum class VerificationStatus {
-    IDLE, VERIFYING, SUCCESS, FAILED_LOCATION, FAILED_TIME, FAILED_ORIENTATION
+    IDLE, VERIFYING, SUCCESS,
+    FAILED_LOCATION, FAILED_TIME, FAILED_ORIENTATION,
+    FAILED_NOT_IN_GROUP, FAILED_ALREADY_ELIMINATED
 }
 
 class GameViewModel(
-    private val repository: GameRepository
+    private val repository: GameRepository,
+    private val assignmentRepository: AssignmentRepository
 ) : ViewModel() {
 
     private val _internalState = MutableStateFlow(GameUiState(isLoading = true))
     private var groupMembersJob: Job? = null
+    private var assignmentJob: Job? = null
+    private var activeTargetJob: Job? = null
+    private var activeTargetRawJob: Job? = null
+    private var challengesJob: Job? = null
 
-    // ── Events ────────────────────────────────────────────────────
-    // Emits Unit whenever a snipe succeeds — MainActivity listens to
-    // this to trigger a fresh GPS fetch and save to Firebase.
     val onSnipeSuccessEvent = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
-
-    // Emits Unit when a user fully logs in (Google or anonymous) so
-    // MainActivity can trigger the first location save.
     val onLoginSuccessEvent = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
 
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -85,7 +104,10 @@ class GameViewModel(
             currentTarget = target,
             leaderboard = leaderboard,
             userGroups = groups,
-            isLoading = false
+            isLoading = false,
+            selectedGroup = internal.selectedGroup?.let { sel ->
+                groups.find { it.id == sel.id } ?: sel
+            }
         )
     }.stateIn(
         scope = viewModelScope,
@@ -97,21 +119,16 @@ class GameViewModel(
 
     fun getUserById(userId: String): Flow<User?> = repository.getUserById(userId)
 
-    fun clearError() {
-        _internalState.update { it.copy(errorMessage = null) }
-    }
+    fun clearError() { _internalState.update { it.copy(errorMessage = null) } }
 
     // ── Auth ──────────────────────────────────────────────────────
 
     fun onSignInAnonymously() {
         viewModelScope.launch {
             _internalState.update { it.copy(isAuthLoading = true, errorMessage = null) }
-            val result = repository.signInAnonymously()
-            result.onSuccess {
-                onLoginSuccessEvent.tryEmit(Unit)
-            }.onFailure { error ->
-                _internalState.update { it.copy(errorMessage = error.message) }
-            }
+            repository.signInAnonymously()
+                .onSuccess { onLoginSuccessEvent.tryEmit(Unit) }
+                .onFailure { e -> _internalState.update { it.copy(errorMessage = e.message) } }
             _internalState.update { it.copy(isAuthLoading = false) }
         }
     }
@@ -119,30 +136,21 @@ class GameViewModel(
     fun onSignInWithGoogle(idToken: String) {
         viewModelScope.launch {
             _internalState.update { it.copy(isAuthLoading = true, errorMessage = null) }
-            val result = repository.signInWithGoogle(idToken)
-            result.onSuccess { signInResult ->
-                when (signInResult) {
-                    is SignInResult.Success -> {
-                        // Returning user — Firebase will update getCurrentUser() flow,
-                        // fire login event so MainActivity saves location
-                        onLoginSuccessEvent.tryEmit(Unit)
-                    }
-                    is SignInResult.NeedsRegistration -> {
-                        // New user — show registration dialog
-                        _internalState.update {
-                            it.copy(
-                                registrationData = RegistrationData(
-                                    userId = signInResult.userId,
-                                    email = signInResult.email,
-                                    defaultName = signInResult.name
-                                )
-                            )
+            repository.signInWithGoogle(idToken)
+                .onSuccess { result ->
+                    when (result) {
+                        is SignInResult.Success -> {
+                            onLoginSuccessEvent.tryEmit(Unit)
+                            result.user.activeGroupId?.let { restoreActiveGroup(it) }
+                            startChallengeListener(result.user.id)
                         }
+                        is SignInResult.NeedsRegistration ->
+                            _internalState.update {
+                                it.copy(registrationData = RegistrationData(result.userId, result.email, result.name))
+                            }
                     }
                 }
-            }.onFailure { error ->
-                _internalState.update { it.copy(errorMessage = error.message) }
-            }
+                .onFailure { e -> _internalState.update { it.copy(errorMessage = e.message) } }
             _internalState.update { it.copy(isAuthLoading = false) }
         }
     }
@@ -151,30 +159,32 @@ class GameViewModel(
         val data = _internalState.value.registrationData ?: return
         viewModelScope.launch {
             _internalState.update { it.copy(isAuthLoading = true, errorMessage = null) }
-            val result = repository.completeRegistration(data.userId, username, name)
-            result.onSuccess {
-                _internalState.update { it.copy(registrationData = null) }
-                // New user just finished registration — save their location too
-                onLoginSuccessEvent.tryEmit(Unit)
-            }.onFailure { error ->
-                _internalState.update { it.copy(errorMessage = error.message) }
-            }
+            repository.completeRegistration(data.userId, username, name)
+                .onSuccess {
+                    _internalState.update { it.copy(registrationData = null) }
+                    onLoginSuccessEvent.tryEmit(Unit)
+                    startChallengeListener(data.userId)
+                }
+                .onFailure { e -> _internalState.update { it.copy(errorMessage = e.message) } }
             _internalState.update { it.copy(isAuthLoading = false) }
         }
     }
 
-    fun onCancelRegistration() {
-        _internalState.update { it.copy(registrationData = null) }
-    }
+    fun onCancelRegistration() { _internalState.update { it.copy(registrationData = null) } }
 
     fun onSignOut() {
-        viewModelScope.launch { repository.signOut() }
+        viewModelScope.launch {
+            clearActiveGroupInternal()
+            challengesJob?.cancel()
+            repository.signOut()
+        }
     }
 
-    // ── Game actions ──────────────────────────────────────────────
+    // ── Game ──────────────────────────────────────────────────────
 
     fun onLikeClicked(snipeId: String) {
-        viewModelScope.launch { repository.toggleLike(snipeId) }
+        val userId = uiState.value.currentUser?.id ?: return
+        viewModelScope.launch { repository.toggleLike(snipeId, userId) }
     }
 
     fun onAssignNewTarget() {
@@ -186,9 +196,7 @@ class GameViewModel(
         _internalState.update { it.copy(isLoading = true, errorMessage = null) }
         viewModelScope.launch {
             repository.joinGroup(code, userId)
-                .onFailure { error ->
-                    _internalState.update { it.copy(errorMessage = "Join failed: ${error.message}") }
-                }
+                .onFailure { e -> _internalState.update { it.copy(errorMessage = "Join failed: ${e.message}") } }
             _internalState.update { it.copy(isLoading = false) }
         }
     }
@@ -198,9 +206,7 @@ class GameViewModel(
         _internalState.update { it.copy(isLoading = true, errorMessage = null) }
         viewModelScope.launch {
             repository.createGroup(name, userId)
-                .onFailure { error ->
-                    _internalState.update { it.copy(errorMessage = "Create failed: ${error.message}") }
-                }
+                .onFailure { e -> _internalState.update { it.copy(errorMessage = "Create failed: ${e.message}") } }
             _internalState.update { it.copy(isLoading = false) }
         }
     }
@@ -210,15 +216,146 @@ class GameViewModel(
         _internalState.update { it.copy(isLoading = true, errorMessage = null) }
         viewModelScope.launch {
             repository.leaveGroup(groupId, userId)
-                .onFailure { error ->
-                    _internalState.update { it.copy(errorMessage = "Leave failed: ${error.message}") }
-                }
+                .onFailure { e -> _internalState.update { it.copy(errorMessage = "Leave failed: ${e.message}") } }
+            if (_internalState.value.selectedGroup?.id == groupId) clearActiveGroupInternal()
             _internalState.update { it.copy(isLoading = false) }
         }
     }
 
+    fun onCaptureButtonPressed(
+        imageUrl: String, hunterLat: Double, hunterLon: Double,
+        hunterHeading: Double, capturedAt: Long
+    ) {
+        val hunter = uiState.value.currentUser ?: return
+        val state = uiState.value
+        val assignment = state.activeAssignment
+        val selectedGroup = state.selectedGroup
+
+        // ── Group snipe ───────────────────────────────────────────
+        if (assignment != null && selectedGroup != null) {
+            if (!selectedGroup.gameActive) { _internalState.update { it.copy(verificationStatus = VerificationStatus.IDLE) }; return }
+            if (assignment.isHunterEliminated || assignment.isTargetEliminated) {
+                _internalState.update { it.copy(verificationStatus = VerificationStatus.FAILED_ALREADY_ELIMINATED) }; return
+            }
+            _internalState.update { it.copy(verificationStatus = VerificationStatus.VERIFYING, errorMessage = null) }
+            viewModelScope.launch {
+                repository.submitSnipe(
+                    hunterId = hunter.id, targetId = assignment.targetId, imageUrl = imageUrl,
+                    hunterLat = hunterLat, hunterLon = hunterLon, hunterHeading = hunterHeading,
+                    capturedAt = capturedAt, groupId = selectedGroup.id
+                ).onSuccess { points ->
+                    assignmentRepository.markEliminated(selectedGroup.id, hunter.id, assignment.targetId)
+                    _internalState.update { it.copy(verificationStatus = VerificationStatus.SUCCESS, lastPointsAwarded = points) }
+                    onSnipeSuccessEvent.tryEmit(Unit)
+                }.onFailure { e ->
+                    _internalState.update {
+                        it.copy(
+                            verificationStatus = when (e.message) {
+                                "TOO_FAR" -> VerificationStatus.FAILED_LOCATION
+                                "TOO_OLD" -> VerificationStatus.FAILED_TIME
+                                "WRONG_ORIENTATION" -> VerificationStatus.FAILED_ORIENTATION
+                                "NOT_IN_GROUP" -> VerificationStatus.FAILED_NOT_IN_GROUP
+                                else -> VerificationStatus.IDLE
+                            },
+                            errorMessage = e.message
+                        )
+                    }
+                }
+            }
+            return
+        }
+
+        // ── Legacy global snipe ───────────────────────────────────
+        val targetId = hunter.currentTargetId ?: return
+        _internalState.update { it.copy(verificationStatus = VerificationStatus.VERIFYING, errorMessage = null) }
+        viewModelScope.launch {
+            repository.submitSnipe(
+                hunterId = hunter.id, targetId = targetId, imageUrl = imageUrl,
+                hunterLat = hunterLat, hunterLon = hunterLon, hunterHeading = hunterHeading,
+                capturedAt = capturedAt, groupId = ""
+            ).onSuccess { points ->
+                _internalState.update { it.copy(verificationStatus = VerificationStatus.SUCCESS, lastPointsAwarded = points) }
+                onSnipeSuccessEvent.tryEmit(Unit)
+            }.onFailure { e ->
+                _internalState.update {
+                    it.copy(
+                        verificationStatus = when (e.message) {
+                            "TOO_FAR" -> VerificationStatus.FAILED_LOCATION
+                            "TOO_OLD" -> VerificationStatus.FAILED_TIME
+                            "WRONG_ORIENTATION" -> VerificationStatus.FAILED_ORIENTATION
+                            else -> VerificationStatus.IDLE
+                        },
+                        errorMessage = e.message
+                    )
+                }
+            }
+        }
+    }
+
+    // ── Group selection ───────────────────────────────────────────
+
+    fun onSelectGroup(group: Group) {
+        val userId = uiState.value.currentUser?.id ?: return
+        if (_internalState.value.selectedGroup?.id == group.id) { clearActiveGroupInternal(); return }
+
+        _internalState.update { it.copy(selectedGroup = group, activeAssignment = null, activeTarget = null, activeTargetRaw = null) }
+        viewModelScope.launch {
+            assignmentRepository.setActiveGroup(userId, group.id)
+            if (group.gameActive) assignmentRepository.triggerDailyResetIfNeeded(group.id)
+            startListeningToAssignment(group.id, userId)
+        }
+    }
+
+    private fun startListeningToAssignment(groupId: String, hunterId: String) {
+        assignmentJob?.cancel(); activeTargetJob?.cancel(); activeTargetRawJob?.cancel()
+
+        assignmentJob = viewModelScope.launch {
+            assignmentRepository.getAssignment(groupId, hunterId).collect { assignment ->
+                _internalState.update { it.copy(activeAssignment = assignment) }
+                activeTargetJob?.cancel(); activeTargetRawJob?.cancel()
+                val targetId = assignment?.targetId ?: run {
+                    _internalState.update { it.copy(activeTarget = null, activeTargetRaw = null) }
+                    return@collect
+                }
+                // Public profile for display
+                activeTargetJob = launch {
+                    repository.getUserById(targetId).collect { user ->
+                        _internalState.update { it.copy(activeTarget = user) }
+                    }
+                }
+                // Raw doc with coordinates for distance/bearing
+                activeTargetRawJob = launch {
+                    repository.getUserByIdRaw(targetId).collect { user ->
+                        _internalState.update { it.copy(activeTargetRaw = user) }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun clearActiveGroupInternal() {
+        assignmentJob?.cancel(); activeTargetJob?.cancel(); activeTargetRawJob?.cancel()
+        val userId = uiState.value.currentUser?.id
+        if (userId != null) viewModelScope.launch { assignmentRepository.setActiveGroup(userId, null) }
+        _internalState.update { it.copy(selectedGroup = null, activeAssignment = null, activeTarget = null, activeTargetRaw = null) }
+    }
+
+    private fun restoreActiveGroup(groupId: String) {
+        viewModelScope.launch {
+            uiState.collect { state ->
+                if (state.userGroups.isNotEmpty()) {
+                    state.userGroups.find { it.id == groupId }?.let { onSelectGroup(it) }
+                    return@collect
+                }
+            }
+        }
+    }
+
+    // ── Admin: members ────────────────────────────────────────────
+
     fun loadGroupMembers(groupId: String) {
         groupMembersJob?.cancel()
+        _internalState.update { it.copy(groupMembers = emptyList()) }
         groupMembersJob = viewModelScope.launch {
             repository.getGroupMembers(groupId).collect { members ->
                 _internalState.update { it.copy(groupMembers = members) }
@@ -227,17 +364,15 @@ class GameViewModel(
     }
 
     fun clearGroupMembers() {
-        groupMembersJob?.cancel()
+        groupMembersJob?.cancel(); groupMembersJob = null
         _internalState.update { it.copy(groupMembers = emptyList()) }
     }
 
-    fun onRenameGroup(groupId: String, newName: String) {
+    fun onKickMember(groupId: String, targetUserId: String) {
         val adminId = uiState.value.currentUser?.id ?: return
         viewModelScope.launch {
-            repository.renameGroup(groupId, newName, adminId)
-                .onFailure { error ->
-                    _internalState.update { it.copy(errorMessage = "Rename failed: ${error.message}") }
-                }
+            repository.kickMember(groupId, targetUserId, adminId)
+                .onFailure { e -> _internalState.update { it.copy(errorMessage = e.message) } }
         }
     }
 
@@ -245,19 +380,16 @@ class GameViewModel(
         val adminId = uiState.value.currentUser?.id ?: return
         viewModelScope.launch {
             repository.deleteGroup(groupId, adminId)
-                .onFailure { error ->
-                    _internalState.update { it.copy(errorMessage = "Delete failed: ${error.message}") }
-                }
+                .onFailure { e -> _internalState.update { it.copy(errorMessage = e.message) } }
+            if (_internalState.value.selectedGroup?.id == groupId) clearActiveGroupInternal()
         }
     }
 
-    fun onKickMember(groupId: String, targetUserId: String) {
+    fun onRenameGroup(groupId: String, newName: String) {
         val adminId = uiState.value.currentUser?.id ?: return
         viewModelScope.launch {
-            repository.kickMember(groupId, targetUserId, adminId)
-                .onFailure { error ->
-                    _internalState.update { it.copy(errorMessage = "Kick failed: ${error.message}") }
-                }
+            repository.renameGroup(groupId, newName, adminId)
+                .onFailure { e -> _internalState.update { it.copy(errorMessage = e.message) } }
         }
     }
 
@@ -265,53 +397,74 @@ class GameViewModel(
         val adminId = uiState.value.currentUser?.id ?: return
         viewModelScope.launch {
             repository.transferAdmin(groupId, newAdminId, adminId)
-                .onFailure { error ->
-                    _internalState.update { it.copy(errorMessage = "Transfer failed: ${error.message}") }
-                }
+                .onFailure { e -> _internalState.update { it.copy(errorMessage = e.message) } }
         }
     }
 
-    fun onCaptureButtonPressed(
-        imageUrl: String,
-        hunterLat: Double,
-        hunterLon: Double,
-        hunterHeading: Double,
-        capturedAt: Long
-    ) {
-        val hunter = uiState.value.currentUser ?: return
-        val targetId = hunter.currentTargetId ?: return
+    // ── Admin: session ────────────────────────────────────────────
 
-        _internalState.update { it.copy(verificationStatus = VerificationStatus.VERIFYING, errorMessage = null) }
-
+    fun onActivateGroup(groupId: String, durationDays: Int) {
+        val adminId = uiState.value.currentUser?.id ?: return
         viewModelScope.launch {
-            val result = repository.submitSnipe(
-                hunterId = hunter.id,
-                targetId = targetId,
-                imageUrl = imageUrl,
-                hunterLat = hunterLat,
-                hunterLon = hunterLon,
-                hunterHeading = hunterHeading,
-                capturedAt = capturedAt
-            )
+            assignmentRepository.activateGroup(groupId, adminId, durationDays)
+                .onFailure { e -> _internalState.update { it.copy(errorMessage = e.message) } }
+        }
+    }
 
-            result.onSuccess { points ->
-                _internalState.update {
-                    it.copy(
-                        verificationStatus = VerificationStatus.SUCCESS,
-                        lastPointsAwarded = points
-                    )
-                }
-                // Fire event so MainActivity saves fresh location after a successful snipe
-                onSnipeSuccessEvent.tryEmit(Unit)
-            }.onFailure { error ->
-                val status = when (error.message) {
-                    "TOO_FAR"          -> VerificationStatus.FAILED_LOCATION
-                    "TOO_OLD"          -> VerificationStatus.FAILED_TIME
-                    "WRONG_ORIENTATION" -> VerificationStatus.FAILED_ORIENTATION
-                    else               -> VerificationStatus.IDLE
-                }
-                _internalState.update { it.copy(verificationStatus = status, errorMessage = error.message) }
+    fun onDeactivateGroup(groupId: String) {
+        val adminId = uiState.value.currentUser?.id ?: return
+        viewModelScope.launch {
+            assignmentRepository.deactivateGroup(groupId, adminId)
+                .onFailure { e -> _internalState.update { it.copy(errorMessage = e.message) } }
+        }
+    }
+
+    fun onForceReassign(groupId: String) {
+        val adminId = uiState.value.currentUser?.id ?: return
+        viewModelScope.launch {
+            assignmentRepository.forceReassign(groupId, adminId)
+                .onFailure { e -> _internalState.update { it.copy(errorMessage = e.message) } }
+        }
+    }
+
+    // ── Challenges ────────────────────────────────────────────────
+
+    private fun startChallengeListener(userId: String) {
+        challengesJob?.cancel()
+        challengesJob = viewModelScope.launch {
+            repository.getPendingChallenges(userId).collect { challenges ->
+                _internalState.update { it.copy(pendingChallenges = challenges) }
             }
+        }
+    }
+
+    fun onSubmitChallenge(snipe: Snipe) {
+        val user = uiState.value.currentUser ?: return
+        viewModelScope.launch {
+            repository.submitChallenge(snipe, user.id, user.name)
+                .onFailure { e -> _internalState.update { it.copy(errorMessage = e.message) } }
+        }
+    }
+
+    fun onSelectChallenge(challenge: SnipeChallenge?) {
+        _internalState.update { it.copy(selectedChallenge = challenge) }
+    }
+
+    fun onUpholdChallenge(challenge: SnipeChallenge) {
+        val adminId = uiState.value.currentUser?.id ?: return
+        viewModelScope.launch {
+            repository.upholdChallenge(challenge, adminId)
+                .onSuccess { _internalState.update { it.copy(selectedChallenge = null) } }
+                .onFailure { e -> _internalState.update { it.copy(errorMessage = e.message) } }
+        }
+    }
+
+    fun onOverturnChallenge(challenge: SnipeChallenge) {
+        val adminId = uiState.value.currentUser?.id ?: return
+        viewModelScope.launch {
+            repository.overturnChallenge(challenge, adminId)
+                .onSuccess { _internalState.update { it.copy(selectedChallenge = null) } }
+                .onFailure { e -> _internalState.update { it.copy(errorMessage = e.message) } }
         }
     }
 }

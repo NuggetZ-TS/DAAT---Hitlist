@@ -1,24 +1,23 @@
 package com.example.daat.data.repository
 
 import android.net.Uri
+import com.example.daat.data.model.ChallengeStatus
 import com.example.daat.data.model.Group
 import com.example.daat.data.model.Snipe
+import com.example.daat.data.model.SnipeChallenge
 import com.example.daat.data.model.SnipeStatus
 import com.example.daat.data.model.User
 import com.example.daat.logic.ScoringManager
 import com.example.daat.logic.VerificationUtils
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.GoogleAuthProvider
+import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
-import com.google.firebase.firestore.SetOptions
 import com.google.firebase.storage.FirebaseStorage
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
-import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.tasks.await
 import java.util.UUID
 
@@ -27,465 +26,451 @@ class FirebaseGameRepository : GameRepository {
     private val db = FirebaseFirestore.getInstance()
     private val storage = FirebaseStorage.getInstance()
 
-    @OptIn(ExperimentalCoroutinesApi::class)
+    // ── Auth ──────────────────────────────────────────────────────
+
     override fun getCurrentUser(): Flow<User?> = callbackFlow {
-        val authListener = FirebaseAuth.AuthStateListener { firebaseAuth ->
-            val userId = firebaseAuth.currentUser?.uid
-            if (userId == null) {
-                trySend(null)
-            }
+        val authListener = FirebaseAuth.AuthStateListener { fa ->
+            if (fa.currentUser?.uid == null) trySend(null)
         }
         auth.addAuthStateListener(authListener)
+        if (auth.currentUser?.uid == null) trySend(null)
 
-        val initialUserId = auth.currentUser?.uid
-        if (initialUserId == null) {
-            trySend(null)
+        var userListener: com.google.firebase.firestore.ListenerRegistration? = null
+        val dataListener = FirebaseAuth.AuthStateListener { fa ->
+            userListener?.remove()
+            val uid = fa.currentUser?.uid ?: return@AuthStateListener
+            userListener = db.collection("users").document(uid)
+                .addSnapshotListener { snap, _ ->
+                    if (snap != null && snap.exists())
+                        trySend(snap.toObject(User::class.java))
+                    else
+                        trySend(null)
+                }
         }
-
-        // We use a separate listener for user data updates
-        var userDataListener: com.google.firebase.firestore.ListenerRegistration? = null
-        
-        val authStateListenerForData = FirebaseAuth.AuthStateListener { firebaseAuth ->
-            userDataListener?.remove()
-            val userId = firebaseAuth.currentUser?.uid
-            if (userId != null) {
-                userDataListener = db.collection("users").document(userId)
-                    .addSnapshotListener { snapshot, _ ->
-                        if (snapshot != null && snapshot.exists()) {
-                            trySend(snapshot.toObject(User::class.java))
-                        } else {
-                            trySend(null)
-                        }
-                    }
-            }
-        }
-        auth.addAuthStateListener(authStateListenerForData)
+        auth.addAuthStateListener(dataListener)
 
         awaitClose {
             auth.removeAuthStateListener(authListener)
-            auth.removeAuthStateListener(authStateListenerForData)
-            userDataListener?.remove()
+            auth.removeAuthStateListener(dataListener)
+            userListener?.remove()
         }
     }
 
-    override suspend fun signInAnonymously(): Result<Unit> {
-        return try {
-            val result = auth.signInAnonymously().await()
-            val userId = result.user?.uid ?: throw Exception("Auth failed")
-            
-            // For anonymous users, we can create a default profile immediately
-            val newUser = User(
-                id = userId,
-                name = "Guest",
-                username = "@guest_${userId.takeLast(4)}",
-                totalScore = 0,
-                groupIds = listOf("global")
-            )
-            db.collection("users").document(userId).set(newUser).await()
-            
-            Result.success(Unit)
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
+    override suspend fun signInAnonymously(): Result<Unit> = try {
+        val uid = auth.signInAnonymously().await().user?.uid ?: throw Exception("Auth failed")
+        db.collection("users").document(uid).set(
+            User(id = uid, name = "Guest", username = "@guest_${uid.takeLast(4)}", groupIds = listOf("global"))
+        ).await()
+        Result.success(Unit)
+    } catch (e: Exception) { Result.failure(e) }
 
-    override suspend fun signInWithGoogle(idToken: String): Result<SignInResult> {
-        return try {
-            val credential = GoogleAuthProvider.getCredential(idToken, null)
-            val authResult = auth.signInWithCredential(credential).await()
-            val firebaseUser = authResult.user ?: throw Exception("Google Auth failed")
-            
-            val userDoc = db.collection("users").document(firebaseUser.uid).get().await()
-            
-            if (userDoc.exists()) {
-                val user = userDoc.toObject(User::class.java)!!
-                Result.success(SignInResult.Success(user))
-            } else {
-                Result.success(SignInResult.NeedsRegistration(
-                    userId = firebaseUser.uid,
-                    email = firebaseUser.email,
-                    name = firebaseUser.displayName
-                ))
-            }
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
+    override suspend fun signInWithGoogle(idToken: String): Result<SignInResult> = try {
+        val cred = GoogleAuthProvider.getCredential(idToken, null)
+        val fu = auth.signInWithCredential(cred).await().user ?: throw Exception("Google Auth failed")
+        val doc = db.collection("users").document(fu.uid).get().await()
+        if (doc.exists())
+            Result.success(SignInResult.Success(doc.toObject(User::class.java)!!))
+        else
+            Result.success(SignInResult.NeedsRegistration(fu.uid, fu.email, fu.displayName))
+    } catch (e: Exception) { Result.failure(e) }
 
-    override suspend fun completeRegistration(userId: String, username: String, name: String): Result<Unit> {
-        return try {
-            val newUser = User(
+    override suspend fun completeRegistration(userId: String, username: String, name: String): Result<Unit> = try {
+        db.collection("users").document(userId).set(
+            User(
                 id = userId,
                 name = name,
                 username = if (username.startsWith("@")) username else "@$username",
-                totalScore = 0,
                 groupIds = listOf("global")
             )
-            db.collection("users").document(userId).set(newUser).await()
-            Result.success(Unit)
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
+        ).await()
+        Result.success(Unit)
+    } catch (e: Exception) { Result.failure(e) }
 
-    override suspend fun signOut(): Result<Unit> {
-        auth.signOut()
-        return Result.success(Unit)
-    }
+    override suspend fun signOut(): Result<Unit> { auth.signOut(); return Result.success(Unit) }
+
+    // ── Game ──────────────────────────────────────────────────────
 
     override fun getCurrentTarget(userId: String): Flow<User?> = callbackFlow {
         val listener = db.collection("users").document(userId)
-            .addSnapshotListener { snapshot, _ ->
-                val user = snapshot?.toObject(User::class.java)
-                val targetId = user?.currentTargetId
-                
-                if (targetId != null) {
-                    db.collection("users").document(targetId)
-                        .get()
-                        .addOnSuccessListener { targetSnapshot ->
-                            val target = targetSnapshot.toObject(User::class.java)
-                            trySend(target?.toPublicProfile())
-                        }
-                } else {
-                    trySend(null)
-                }
+            .addSnapshotListener { snap, _ ->
+                val tid = snap?.toObject(User::class.java)?.currentTargetId
+                if (tid != null)
+                    db.collection("users").document(tid).get()
+                        .addOnSuccessListener { trySend(it.toObject(User::class.java)?.toPublicProfile()) }
+                else trySend(null)
             }
         awaitClose { listener.remove() }
     }
 
+    /**
+     * Leaderboard fix: Firestore compound queries (whereArrayContains + orderBy)
+     * require a composite index that may not exist, causing silent empty results.
+     * We fetch by groupId only and sort in-memory instead.
+     */
     override fun getLeaderboard(groupId: String): Flow<List<User>> = callbackFlow {
         val listener = db.collection("users")
             .whereArrayContains("groupIds", groupId)
-            .orderBy("totalScore", Query.Direction.DESCENDING)
-            .limit(50)
-            .addSnapshotListener { snapshot, _ ->
-                val users = snapshot?.documents?.mapNotNull { doc ->
-                    doc.toObject(User::class.java)?.toPublicProfile()
-                } ?: emptyList()
+            .addSnapshotListener { snap, err ->
+                if (err != null || snap == null) {
+                    trySend(emptyList())
+                    return@addSnapshotListener
+                }
+                val users = snap.documents
+                    .mapNotNull { it.toObject(User::class.java)?.toPublicProfile() }
+                    .sortedByDescending { it.totalScore }
                 trySend(users)
             }
         awaitClose { listener.remove() }
     }
 
     override fun getSnipeFeed(): Flow<List<Snipe>> = callbackFlow {
+        val currentUid = auth.currentUser?.uid
         val listener = db.collection("snipes")
             .orderBy("timestamp", Query.Direction.DESCENDING)
             .limit(50)
-            .addSnapshotListener { snapshot, _ ->
-                val snipes = snapshot?.documents?.mapNotNull { it.toObject(Snipe::class.java) } ?: emptyList()
+            .addSnapshotListener { snap, _ ->
+                val snipes = snap?.documents?.mapNotNull { doc ->
+                    val snipe = doc.toObject(Snipe::class.java) ?: return@mapNotNull null
+                    // Derive isLikedByMe from the likedBy list
+                    snipe.copy(isLikedByMe = currentUid != null && snipe.likedBy.contains(currentUid))
+                } ?: emptyList()
                 trySend(snipes)
             }
         awaitClose { listener.remove() }
     }
 
-    override suspend fun updateLocation(userId: String, latitude: Double, longitude: Double): Result<Unit> {
-        return try {
-            db.collection("users").document(userId)
-                .update(mapOf(
-                    "latitude" to latitude,
-                    "longitude" to longitude,
-                    "lastLocationUpdate" to System.currentTimeMillis()
-                )).await()
-            Result.success(Unit)
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
+    override suspend fun updateLocation(userId: String, latitude: Double, longitude: Double): Result<Unit> = try {
+        db.collection("users").document(userId).update(
+            mapOf("latitude" to latitude, "longitude" to longitude, "lastLocationUpdate" to System.currentTimeMillis())
+        ).await()
+        Result.success(Unit)
+    } catch (e: Exception) { Result.failure(e) }
 
     override suspend fun submitSnipe(
-        hunterId: String,
-        targetId: String,
-        imageUrl: String,
-        hunterLat: Double,
-        hunterLon: Double,
-        hunterHeading: Double,
-        capturedAt: Long
-    ): Result<Int> {
-        return try {
-            val targetDoc = db.collection("users").document(targetId).get().await()
-            val target = targetDoc.toObject(User::class.java) ?: throw Exception("TARGET_NOT_FOUND")
-            
-            val targetLat = target.latitude ?: 0.0
-            val targetLon = target.longitude ?: 0.0
+        hunterId: String, targetId: String, imageUrl: String,
+        hunterLat: Double, hunterLon: Double, hunterHeading: Double,
+        capturedAt: Long, groupId: String
+    ): Result<Int> = try {
+        if (groupId.isNotEmpty()) {
+            val group = db.collection("groups").document(groupId).get().await()
+                .toObject(Group::class.java) ?: throw Exception("GROUP_NOT_FOUND")
+            if (!group.members.contains(targetId)) throw Exception("NOT_IN_GROUP")
+        }
 
-            val distance = VerificationUtils.calculateDistance(hunterLat, hunterLon, targetLat, targetLon)
-            if (distance > 50.0) throw Exception("TOO_FAR")
+        // Fetch raw target doc (with coordinates)
+        val target = db.collection("users").document(targetId).get().await()
+            .toObject(User::class.java) ?: throw Exception("TARGET_NOT_FOUND")
 
-            val targetBearing = VerificationUtils.calculateBearing(hunterLat, hunterLon, targetLat, targetLon)
-            if (!VerificationUtils.isPointingAtTarget(hunterHeading, targetBearing)) {
-                throw Exception("WRONG_ORIENTATION")
-            }
+        val verification = VerificationUtils.verifySnipe(
+            hunterLat = hunterLat, hunterLon = hunterLon, hunterHeading = hunterHeading,
+            targetLat = target.latitude, targetLon = target.longitude, capturedAt = capturedAt
+        )
+        if (!verification.success) throw Exception(verification.errorCode)
 
-            val fileName = "snipes/${UUID.randomUUID()}.jpg"
-            val storageRef = storage.reference.child(fileName)
-            storageRef.putFile(Uri.parse(imageUrl)).await()
-            val downloadUrl = storageRef.downloadUrl.await().toString()
+        val fileName = "snipes/${UUID.randomUUID()}.jpg"
+        val ref = storage.reference.child(fileName)
+        ref.putFile(Uri.parse(imageUrl)).await()
+        val downloadUrl = ref.downloadUrl.await().toString()
 
-            val hunterDoc = db.collection("users").document(hunterId).get().await()
-            val hunter = hunterDoc.toObject(User::class.java) ?: throw Exception("HUNTER_NOT_FOUND")
-            
-            val points = ScoringManager.calculatePoints(
-                distanceMeters = distance,
-                streak = hunter.currentStreak,
-                targetAssignedAt = hunter.targetAssignedAt,
-                capturedAt = capturedAt
+        val hunter = db.collection("users").document(hunterId).get().await()
+            .toObject(User::class.java) ?: throw Exception("HUNTER_NOT_FOUND")
+
+        val points = ScoringManager.calculatePoints(
+            distanceMeters = verification.distanceMeters,
+            streak = hunter.currentStreak,
+            targetAssignedAt = hunter.targetAssignedAt,
+            capturedAt = capturedAt
+        )
+
+        val snipeId = UUID.randomUUID().toString()
+        db.collection("snipes").document(snipeId).set(
+            Snipe(
+                id = snipeId, hunterId = hunterId, targetId = targetId,
+                groupId = groupId, timestamp = capturedAt, imageUrl = downloadUrl,
+                status = SnipeStatus.VERIFIED, pointsAwarded = points
             )
+        ).await()
 
-            val snipeId = UUID.randomUUID().toString()
-            val newSnipe = Snipe(
-                id = snipeId,
-                hunterId = hunterId,
-                targetId = targetId,
-                timestamp = capturedAt,
-                imageUrl = downloadUrl,
-                status = SnipeStatus.VERIFIED,
-                pointsAwarded = points
-            )
-            db.collection("snipes").document(snipeId).set(newSnipe).await()
-
-            // Update Hunter Stats, Rotation, and current Location in DB
-            db.collection("users").document(hunterId).update(mapOf(
+        db.collection("users").document(hunterId).update(
+            mapOf(
                 "totalScore" to (hunter.totalScore + points),
                 "currentStreak" to (hunter.currentStreak + 1),
                 "currentTargetId" to null,
-                "latitude" to hunterLat,
-                "longitude" to hunterLon,
+                "latitude" to hunterLat, "longitude" to hunterLon,
                 "lastLocationUpdate" to System.currentTimeMillis()
-            )).await()
+            )
+        ).await()
 
-            Result.success(points)
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
+        Result.success(points)
+    } catch (e: Exception) { Result.failure(e) }
 
-    override suspend fun assignDailyTargets(groupId: String): Result<Unit> {
-        return Result.failure(Exception("Not implemented locally for Firebase. Use Cloud Functions."))
-    }
+    override suspend fun assignDailyTargets(groupId: String): Result<Unit> = try {
+        val group = db.collection("groups").document(groupId).get().await()
+            .toObject(Group::class.java) ?: throw Exception("Group not found")
+        val ids = group.members.shuffled()
+        if (ids.size < 2) throw Exception("Need at least 2 members")
+        db.runBatch { batch ->
+            ids.forEachIndexed { i, hId ->
+                batch.update(db.collection("users").document(hId),
+                    mapOf("currentTargetId" to ids[(i + 1) % ids.size],
+                        "targetAssignedAt" to System.currentTimeMillis()))
+            }
+        }.await()
+        Result.success(Unit)
+    } catch (e: Exception) { Result.failure(e) }
 
+    /** Public profile — no coordinates. Safe for UI display. */
     override fun getUserById(userId: String): Flow<User?> = callbackFlow {
         val listener = db.collection("users").document(userId)
-            .addSnapshotListener { snapshot, _ ->
-                trySend(snapshot?.toObject(User::class.java)?.toPublicProfile())
+            .addSnapshotListener { snap, _ ->
+                trySend(snap?.toObject(User::class.java)?.toPublicProfile())
             }
         awaitClose { listener.remove() }
     }
 
-    override suspend fun toggleLike(snipeId: String): Result<Unit> {
-        return try {
-            db.collection("snipes").document(snipeId)
-                .update("likes", com.google.firebase.firestore.FieldValue.increment(1))
-                .await()
-            Result.success(Unit)
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
+    /**
+     * Raw document — includes lat/lng. Only used internally for
+     * distance/bearing calculations toward the active target.
+     */
+    override fun getUserByIdRaw(userId: String): Flow<User?> = callbackFlow {
+        val listener = db.collection("users").document(userId)
+            .addSnapshotListener { snap, _ ->
+                trySend(snap?.toObject(User::class.java))
+            }
+        awaitClose { listener.remove() }
     }
+
+    /**
+     * Like fix: uses a Firestore transaction to atomically toggle the
+     * current user's ID in the likedBy array and keep the likes count
+     * in sync. Prevents multiple likes from the same user.
+     */
+    override suspend fun toggleLike(snipeId: String, userId: String): Result<Unit> = try {
+        val snipeRef = db.collection("snipes").document(snipeId)
+        db.runTransaction { tx ->
+            val snap = tx.get(snipeRef)
+            @Suppress("UNCHECKED_CAST")
+            val likedBy = snap.get("likedBy") as? List<String> ?: emptyList()
+            if (likedBy.contains(userId)) {
+                tx.update(snipeRef, "likedBy", FieldValue.arrayRemove(userId))
+                tx.update(snipeRef, "likes", FieldValue.increment(-1))
+            } else {
+                tx.update(snipeRef, "likedBy", FieldValue.arrayUnion(userId))
+                tx.update(snipeRef, "likes", FieldValue.increment(1))
+            }
+        }.await()
+        Result.success(Unit)
+    } catch (e: Exception) { Result.failure(e) }
+
+    // ── Groups ────────────────────────────────────────────────────
 
     override fun getUserGroups(userId: String): Flow<List<Group>> = callbackFlow {
         val listener = db.collection("groups")
             .whereArrayContains("members", userId)
-            .addSnapshotListener { snapshot, _ ->
-                val groups = snapshot?.documents?.mapNotNull { it.toObject(Group::class.java) } ?: emptyList()
-                trySend(groups)
+            .addSnapshotListener { snap, _ ->
+                trySend(snap?.documents?.mapNotNull { it.toObject(Group::class.java) } ?: emptyList())
             }
         awaitClose { listener.remove() }
     }
 
-    override suspend fun createGroup(name: String, adminId: String): Result<String> {
-        return try {
-            val inviteCode = (1..6).map { ('A'..'Z').random() }.joinToString("")
-            val docRef = db.collection("groups").document()
-            val group = Group(
-                id = docRef.id,
-                name = name,
-                inviteCode = inviteCode,
-                adminId = adminId,
-                members = listOf(adminId)
-            )
-            docRef.set(group).await()
-            
-            val userRef = db.collection("users").document(adminId)
-            db.runTransaction { transaction ->
-                val userSnapshot = transaction.get(userRef)
-                val user = userSnapshot.toObject(User::class.java)
-                val newGroupIds = (user?.groupIds ?: emptyList()) + docRef.id
-                transaction.update(userRef, "groupIds", newGroupIds)
-            }.await()
-
-            Result.success(inviteCode)
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
+    override suspend fun createGroup(name: String, adminId: String): Result<String> = try {
+        val code = (1..6).map { ('A'..'Z').random() }.joinToString("")
+        val ref = db.collection("groups").document()
+        ref.set(Group(id = ref.id, name = name, inviteCode = code, adminId = adminId, members = listOf(adminId))).await()
+        db.runTransaction { tx ->
+            val uRef = db.collection("users").document(adminId)
+            val u = tx.get(uRef).toObject(User::class.java)
+            tx.update(uRef, "groupIds", (u?.groupIds ?: emptyList()) + ref.id)
+        }.await()
+        Result.success(code)
+    } catch (e: Exception) { Result.failure(e) }
 
     override suspend fun joinGroup(inviteCode: String, userId: String): Result<Unit> {
         return try {
-            val normalizedCode = inviteCode.uppercase().trim()
-            val groupSnapshot = db.collection("groups")
-                .whereEqualTo("inviteCode", normalizedCode)
-                .limit(1)
-                .get()
-                .await()
-            
-            val groupDoc = groupSnapshot.documents.firstOrNull() 
+            val code = inviteCode.uppercase().trim()
+            val gSnap = db.collection("groups").whereEqualTo("inviteCode", code).limit(1).get().await()
+            val gDoc = gSnap.documents.firstOrNull()
                 ?: return Result.failure(Exception("Invalid invite code"))
-            
-            val groupId = groupDoc.id
-            val groupRef = groupDoc.reference
-            val userRef = db.collection("users").document(userId)
-
-            db.runTransaction { transaction ->
-                // READS FIRST
-                val latestGroup = transaction.get(groupRef).toObject(Group::class.java) 
-                    ?: throw Exception("Group no longer exists")
-                val latestUser = transaction.get(userRef).toObject(User::class.java)
-                    ?: throw Exception("User not found")
-
-                if (latestGroup.members.contains(userId)) {
-                    // Already a member, do nothing but succeed
-                    return@runTransaction
+            db.runTransaction { tx ->
+                val g = tx.get(gDoc.reference).toObject(Group::class.java) ?: throw Exception("Group gone")
+                val u = tx.get(db.collection("users").document(userId)).toObject(User::class.java) ?: throw Exception("User not found")
+                if (!g.members.contains(userId)) {
+                    tx.update(gDoc.reference, "members", g.members + userId)
+                    tx.update(db.collection("users").document(userId), "groupIds", (u.groupIds + gDoc.id).distinct())
                 }
-
-                // WRITES SECOND
-                val newMembers = latestGroup.members + userId
-                val newGroupIds = (latestUser.groupIds + groupId).distinct()
-                
-                transaction.update(groupRef, "members", newMembers)
-                transaction.update(userRef, "groupIds", newGroupIds)
             }.await()
-
             Result.success(Unit)
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
+        } catch (e: Exception) { Result.failure(e) }
     }
 
     override suspend fun leaveGroup(groupId: String, userId: String): Result<Unit> {
+        if (groupId == "global") return Result.failure(Exception("Cannot leave global group"))
         return try {
-            if (groupId == "global") return Result.failure(Exception("Cannot leave global group"))
-
-            val groupRef = db.collection("groups").document(groupId)
-            val userRef = db.collection("users").document(userId)
-
-            db.runTransaction { transaction ->
-                val group = transaction.get(groupRef).toObject(Group::class.java) ?: throw Exception("Group not found")
-                val user = transaction.get(userRef).toObject(User::class.java) ?: throw Exception("User not found")
-
-                val newMembers = group.members - userId
-                val newGroupIds = user.groupIds - groupId
-
-                // If user was admin, transfer admin to someone else or delete group if empty
-                if (group.adminId == userId) {
-                    if (newMembers.isNotEmpty()) {
-                        transaction.update(groupRef, "adminId", newMembers.first())
-                    } else {
-                        transaction.delete(groupRef)
-                    }
+            val gRef = db.collection("groups").document(groupId)
+            val uRef = db.collection("users").document(userId)
+            db.runTransaction { tx ->
+                val g = tx.get(gRef).toObject(Group::class.java) ?: throw Exception("Group not found")
+                val u = tx.get(uRef).toObject(User::class.java) ?: throw Exception("User not found")
+                val newMembers = g.members - userId
+                if (g.adminId == userId) {
+                    if (newMembers.isNotEmpty()) tx.update(gRef, "adminId", newMembers.first())
+                    else { tx.delete(gRef); return@runTransaction }
                 }
-
-                transaction.update(groupRef, "members", newMembers)
-                transaction.update(userRef, "groupIds", newGroupIds)
+                tx.update(gRef, "members", newMembers)
+                tx.update(uRef, "groupIds", u.groupIds - groupId)
             }.await()
-
             Result.success(Unit)
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
+        } catch (e: Exception) { Result.failure(e) }
     }
 
     override fun getGroupMembers(groupId: String): Flow<List<User>> = callbackFlow {
-        val groupListener = db.collection("groups").document(groupId)
-            .addSnapshotListener { groupSnapshot, _ ->
-                val memberIds = groupSnapshot?.get("members") as? List<String> ?: emptyList()
-                if (memberIds.isEmpty()) {
+        val listener = db.collection("groups").document(groupId)
+            .addSnapshotListener { gSnap, _ ->
+                val ids = gSnap?.get("members") as? List<String> ?: emptyList()
+                if (ids.isEmpty()) { trySend(emptyList()); return@addSnapshotListener }
+                db.collection("users").whereIn("id", ids.take(30)).get()
+                    .addOnSuccessListener { snap ->
+                        trySend(snap.documents.mapNotNull { it.toObject(User::class.java)?.toPublicProfile() })
+                    }
+            }
+        awaitClose { listener.remove() }
+    }
+
+    override suspend fun kickMember(groupId: String, targetUserId: String, adminId: String): Result<Unit> = try {
+        val gRef = db.collection("groups").document(groupId)
+        val tRef = db.collection("users").document(targetUserId)
+        db.runTransaction { tx ->
+            val g = tx.get(gRef).toObject(Group::class.java) ?: throw Exception("Group not found")
+            if (g.adminId != adminId) throw Exception("Not authorized")
+            if (targetUserId == adminId) throw Exception("Admin cannot kick themselves")
+            val u = tx.get(tRef).toObject(User::class.java) ?: throw Exception("User not found")
+            tx.update(gRef, "members", g.members - targetUserId)
+            tx.update(tRef, "groupIds", u.groupIds - groupId)
+        }.await()
+        Result.success(Unit)
+    } catch (e: Exception) { Result.failure(e) }
+
+    override suspend fun deleteGroup(groupId: String, adminId: String): Result<Unit> {
+        if (groupId == "global") return Result.failure(Exception("Cannot delete global group"))
+        return try {
+            val g = db.collection("groups").document(groupId).get().await()
+                .toObject(Group::class.java) ?: throw Exception("Group not found")
+            if (g.adminId != adminId) throw Exception("Not authorized")
+            db.runBatch { batch ->
+                g.members.forEach { batch.update(db.collection("users").document(it), "groupIds", FieldValue.arrayRemove(groupId)) }
+                batch.delete(db.collection("groups").document(groupId))
+            }.await()
+            Result.success(Unit)
+        } catch (e: Exception) { Result.failure(e) }
+    }
+
+    override suspend fun renameGroup(groupId: String, newName: String, adminId: String): Result<Unit> = try {
+        val gRef = db.collection("groups").document(groupId)
+        val g = gRef.get().await().toObject(Group::class.java) ?: throw Exception("Group not found")
+        if (g.adminId != adminId) throw Exception("Not authorized")
+        gRef.update("name", newName).await()
+        Result.success(Unit)
+    } catch (e: Exception) { Result.failure(e) }
+
+    override suspend fun transferAdmin(groupId: String, newAdminId: String, currentAdminId: String): Result<Unit> = try {
+        val gRef = db.collection("groups").document(groupId)
+        val g = gRef.get().await().toObject(Group::class.java) ?: throw Exception("Group not found")
+        if (g.adminId != currentAdminId) throw Exception("Not authorized")
+        if (!g.members.contains(newAdminId)) throw Exception("New admin must be a member")
+        gRef.update("adminId", newAdminId).await()
+        Result.success(Unit)
+    } catch (e: Exception) { Result.failure(e) }
+
+    // ── Challenges ────────────────────────────────────────────────
+
+    override suspend fun submitChallenge(
+        snipe: Snipe,
+        challengerId: String,
+        challengerName: String
+    ): Result<Unit> = try {
+        if (snipe.hasBeenChallenged) throw Exception("Already challenged")
+        if (snipe.targetId != challengerId) throw Exception("Only the target may challenge")
+
+        val challengeId = UUID.randomUUID().toString()
+        val challenge = SnipeChallenge(
+            id = challengeId,
+            snipeId = snipe.id,
+            groupId = snipe.groupId,
+            challengerId = challengerId,
+            hunterId = snipe.hunterId,
+            pointsAtStake = snipe.pointsAwarded,
+            timestamp = System.currentTimeMillis(),
+            status = ChallengeStatus.PENDING,
+            imageUrl = snipe.imageUrl,
+            hunterName = "",         // resolved in ViewModel from getUserById
+            challengerName = challengerName
+        )
+
+        db.runBatch { batch ->
+            batch.set(db.collection("challenges").document(challengeId), challenge)
+            batch.update(db.collection("snipes").document(snipe.id), "hasBeenChallenged", true)
+        }.await()
+        Result.success(Unit)
+    } catch (e: Exception) { Result.failure(e) }
+
+    /**
+     * Gets all PENDING challenges for groups where the given user is admin.
+     * We query challenges by groupId list from the groups the user admins.
+     */
+    override fun getPendingChallenges(adminId: String): Flow<List<SnipeChallenge>> = callbackFlow {
+        // First get the groups this user admins
+        val groupsListener = db.collection("groups")
+            .whereEqualTo("adminId", adminId)
+            .addSnapshotListener { groupSnap, _ ->
+                val groupIds = groupSnap?.documents?.mapNotNull { it.id } ?: emptyList()
+                if (groupIds.isEmpty()) {
                     trySend(emptyList())
                     return@addSnapshotListener
                 }
-                
-                // Fetch all members' public profiles
-                db.collection("users")
-                    .whereIn("id", memberIds)
+                // Then get pending challenges for those groups
+                db.collection("challenges")
+                    .whereIn("groupId", groupIds.take(10))
+                    .whereEqualTo("status", ChallengeStatus.PENDING.name)
+                    .orderBy("timestamp", Query.Direction.DESCENDING)
                     .get()
-                    .addOnSuccessListener { usersSnapshot ->
-                        val users = usersSnapshot.documents.mapNotNull { it.toObject(User::class.java)?.toPublicProfile() }
-                        trySend(users)
+                    .addOnSuccessListener { cSnap ->
+                        trySend(cSnap.documents.mapNotNull { it.toObject(SnipeChallenge::class.java) })
                     }
+                    .addOnFailureListener { trySend(emptyList()) }
             }
-        awaitClose { groupListener.remove() }
+        awaitClose { groupsListener.remove() }
     }
 
-    override suspend fun kickMember(groupId: String, targetUserId: String, adminId: String): Result<Unit> {
-        return try {
-            val groupRef = db.collection("groups").document(groupId)
-            val targetUserRef = db.collection("users").document(targetUserId)
+    override suspend fun upholdChallenge(challenge: SnipeChallenge, adminId: String): Result<Unit> = try {
+        // Verify admin owns the group
+        val group = db.collection("groups").document(challenge.groupId).get().await()
+            .toObject(Group::class.java) ?: throw Exception("Group not found")
+        if (group.adminId != adminId) throw Exception("Not authorized")
 
-            db.runTransaction { transaction ->
-                val group = transaction.get(groupRef).toObject(Group::class.java) ?: throw Exception("Group not found")
-                if (group.adminId != adminId) throw Exception("Only admin can kick members")
-                if (targetUserId == adminId) throw Exception("Admin cannot kick themselves")
+        db.collection("challenges").document(challenge.id)
+            .update("status", ChallengeStatus.UPHELD.name).await()
+        Result.success(Unit)
+    } catch (e: Exception) { Result.failure(e) }
 
-                val targetUser = transaction.get(targetUserRef).toObject(User::class.java) ?: throw Exception("User not found")
+    override suspend fun overturnChallenge(challenge: SnipeChallenge, adminId: String): Result<Unit> = try {
+        val group = db.collection("groups").document(challenge.groupId).get().await()
+            .toObject(Group::class.java) ?: throw Exception("Group not found")
+        if (group.adminId != adminId) throw Exception("Not authorized")
 
-                transaction.update(groupRef, "members", group.members - targetUserId)
-                transaction.update(targetUserRef, "groupIds", targetUser.groupIds - groupId)
-            }.await()
+        // Reverse points from hunter
+        val hunterRef = db.collection("users").document(challenge.hunterId)
+        val snipeRef = db.collection("snipes").document(challenge.snipeId)
+        val challengeRef = db.collection("challenges").document(challenge.id)
 
-            Result.success(Unit)
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
-
-    override suspend fun deleteGroup(groupId: String, adminId: String): Result<Unit> {
-        return try {
-            if (groupId == "global") return Result.failure(Exception("Cannot delete global group"))
-            
-            val groupRef = db.collection("groups").document(groupId)
-            val group = groupRef.get().await().toObject(Group::class.java) ?: throw Exception("Group not found")
-            if (group.adminId != adminId) throw Exception("Only admin can delete group")
-
-            val memberIds = group.members
-            
-            // Remove group from all members' lists
-            db.runBatch { batch ->
-                memberIds.forEach { memberId ->
-                    val userRef = db.collection("users").document(memberId)
-                    batch.update(userRef, "groupIds", com.google.firebase.firestore.FieldValue.arrayRemove(groupId))
-                }
-                batch.delete(groupRef)
-            }.await()
-
-            Result.success(Unit)
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
-
-    override suspend fun renameGroup(groupId: String, newName: String, adminId: String): Result<Unit> {
-        return try {
-            val groupRef = db.collection("groups").document(groupId)
-            val group = groupRef.get().await().toObject(Group::class.java) ?: throw Exception("Group not found")
-            if (group.adminId != adminId) throw Exception("Only admin can rename group")
-
-            groupRef.update("name", newName).await()
-            Result.success(Unit)
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
-
-    override suspend fun transferAdmin(groupId: String, newAdminId: String, currentAdminId: String): Result<Unit> {
-        return try {
-            val groupRef = db.collection("groups").document(groupId)
-            val group = groupRef.get().await().toObject(Group::class.java) ?: throw Exception("Group not found")
-            if (group.adminId != currentAdminId) throw Exception("Only current admin can transfer ownership")
-            if (!group.members.contains(newAdminId)) throw Exception("New admin must be a member of the group")
-
-            groupRef.update("adminId", newAdminId).await()
-            Result.success(Unit)
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
+        db.runTransaction { tx ->
+            val hunter = tx.get(hunterRef).toObject(User::class.java)
+                ?: throw Exception("Hunter not found")
+            val newScore = (hunter.totalScore - challenge.pointsAtStake).coerceAtLeast(0)
+            val newStreak = (hunter.currentStreak - 1).coerceAtLeast(0)
+            tx.update(hunterRef, mapOf("totalScore" to newScore, "currentStreak" to newStreak))
+            tx.update(snipeRef, "status", SnipeStatus.OVERTURNED.name)
+            tx.update(challengeRef, "status", ChallengeStatus.OVERTURNED.name)
+        }.await()
+        Result.success(Unit)
+    } catch (e: Exception) { Result.failure(e) }
 }
